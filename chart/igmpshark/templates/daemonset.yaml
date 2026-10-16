@@ -1,0 +1,167 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "igmpshark.name" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "igmpshark.name" . }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "igmpshark.name" . }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "igmpshark.name" . }}
+    spec:
+      serviceAccountName: {{ include "igmpshark.serviceAccountName" . }}
+      hostNetwork: {{ .Values.hostNetwork }}
+      dnsPolicy: {{ .Values.dnsPolicy }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.cilium.image }}
+      initContainers:
+        - name: cilium-dbg
+          image: {{ .Values.cilium.image | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              if [ -x {{ .Values.cilium.dbgPath | quote }} ]; then
+                cp {{ .Values.cilium.dbgPath }} /opt/cilium/cilium-dbg
+              elif [ -x /usr/bin/cilium ]; then
+                cp /usr/bin/cilium /opt/cilium/cilium-dbg
+              else
+                echo "cilium-dbg not found in the Cilium image" >&2
+                exit 1
+              fi
+          volumeMounts:
+            - name: cilium-bin
+              mountPath: /opt/cilium
+      {{- end }}
+      containers:
+        - name: igmpshark
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          command: ["/usr/local/bin/igmpshark"]
+          args:
+            - --backend
+            - {{ .Values.config.backend | quote }}
+            - --state
+            - {{ .Values.config.statePath | quote }}
+            - --ledger
+            - {{ .Values.config.ledgerPath | quote }}
+            - --coord-dir
+            - {{ .Values.config.coordDir | quote }}
+            - --listen
+            - {{ .Values.config.listen | quote }}
+            - --node-name
+            - $(NODE_NAME)
+            - --node-ip
+            - $(NODE_IP)
+            - --self-ip
+            - $(NODE_IP)
+            - --query-interval-ms
+            - {{ .Values.config.queryIntervalMs | quote }}
+            - --query-response-ms
+            - {{ .Values.config.queryResponseMs | quote }}
+            - --robustness
+            - {{ .Values.config.robustness | quote }}
+            - --lmqi-ms
+            - {{ .Values.config.lmqiMs | quote }}
+            - --startup-grace-ms
+            - {{ .Values.config.startupGraceMs | quote }}
+            - --reconcile-ms
+            - {{ .Values.config.reconcileMs | quote }}
+            - --max-members
+            - {{ .Values.config.maxMembers | quote }}
+            {{- range .Values.config.interfaces }}
+            - --iface
+            - {{ . | quote }}
+            {{- end }}
+            {{- if .Values.config.dryRun }}
+            - --dry-run
+            {{- end }}
+            {{- if .Values.config.activeQuerier }}
+            - --active-querier
+            {{- end }}
+            {{- if .Values.config.immediateLeave }}
+            - --immediate-leave
+            {{- end }}
+            {{- if .Values.config.kube }}
+            - --kube
+            {{- end }}
+            {{- if .Values.config.kubeCoord }}
+            - --kube-coord
+            {{- end }}
+            {{- if .Values.cilium.image }}
+            - --cilium-dbg
+            - /opt/cilium/cilium-dbg
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.probes.port }}
+              hostPort: {{ .Values.probes.port }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/igmpshark
+            - name: cilium-run
+              mountPath: /var/run/cilium
+              readOnly: true
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+              readOnly: true
+            {{- if .Values.cilium.image }}
+            - name: cilium-bin
+              mountPath: /opt/cilium
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: state
+          emptyDir: {}
+        - name: cilium-run
+          hostPath:
+            path: {{ .Values.cilium.socketHostPath }}
+            type: Directory
+        - name: bpffs
+          hostPath:
+            path: {{ .Values.volumes.bpffs }}
+            type: Directory
+        {{- if .Values.cilium.image }}
+        - name: cilium-bin
+          emptyDir: {}
+        {{- end }}

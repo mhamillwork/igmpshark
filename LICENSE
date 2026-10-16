@@ -1,0 +1,18 @@
+igmpshark is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 2 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program. If not, see <https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt>.
+
+libwireshark 4.2.6 is GPL-2.0-or-later. src/ws_capture.c adapts the epan and
+wiretap lifecycle from the dbshark program in the attached reference archive
+sqlshark-cursor-jsonb-promotion-races-94e7.zip (src/dbshark.c). PostgreSQL
+ingestion from that program is not included. scripts/build-wireshark-4.2.6.sh,
+scripts/deps-debian.sh, and scripts/deps-rhel.sh are adapted from
+tests/dbshark/build in the same archive.
