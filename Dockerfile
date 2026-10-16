@@ -37,6 +37,8 @@ RUN NATIVE=0 \
     && cp -a /usr/lib64/libcares.so.2* /opt/igmpshark/lib/
 
 FROM registry.access.redhat.com/ubi9/ubi:9.8
+# libcurl-minimal is already installed and provides libcurl.so.4. The libcurl
+# package conflicts with it.
 RUN dnf -y install \
         glib2 libgcrypt libgpg-error libpcap pcre pcre2 zlib libxml2 lz4-libs libzstd \
         libnghttp2 brotli krb5-libs libssh xz-libs ca-certificates \
