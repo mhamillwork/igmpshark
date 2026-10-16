@@ -19,6 +19,7 @@ if ! kubectl -n kube-system get ds cilium >/dev/null 2>&1; then
     exit 2
 fi
 
+echo "Multicast was validated operationally only on RHEL 9 with Cilium 1.19.2 or 1.19.3."
 echo "Cilium is present. This repository does not ship a passing fake of the"
 echo "datapath test. Inspect membership with:"
 echo "  kubectl -n kube-system exec ds/cilium -- cilium-dbg bpf multicast subscriber list all"

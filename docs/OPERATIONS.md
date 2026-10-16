@@ -69,9 +69,9 @@ The DaemonSet runs as root so it can open raw sockets. It drops all capabilities
 
 ## RHEL
 
-RHEL 9 is the intended build host: `sudo ./scripts/deps-rhel.sh` then the Wireshark and igmpshark build commands in the README. The Wireshark tarball URL and sha256 are in `scripts/build-wireshark-4.2.6.sh`. For a disconnected build, put `wireshark-4.2.6.tar.xz` where the script can see an already extracted tree, or pass that tree as the install directory, and load the image with `docker load` or `podman load` rather than pulling it.
+Multicast runs on RHEL 9 nodes with Cilium 1.19.2 or 1.19.3. Build the agent there with `sudo ./scripts/deps-rhel.sh`, then the Wireshark and igmpshark commands in the README. The Wireshark tarball URL and sha256 are in `scripts/build-wireshark-4.2.6.sh`. For a disconnected build, place an already extracted Wireshark 4.2.6 tree on the install path the script checks, and load the image with `podman load` or `docker load`.
 
-RHEL 8 can compile Wireshark 4.2.6 with the same package script (gcc 8, CRB/PowerTools). Do not link the RHEL wireshark RPM; it is not 4.2.6. RHEL 8's 4.18 kernel is older than the kernels Cilium multicast is developed against, so a successful RHEL 8 build is not a statement that the datapath will forward. Use a RHEL 9 node, or another 5.10+ kernel, for the agent. The unit tests need Python only for the fixture generator and the simulation; the C tests themselves are C11.
+Do not link the RHEL wireshark RPM; it is not 4.2.6. RHEL 8 can still compile this C program, and `scripts/deps-rhel.sh` accepts it for that, but RHEL 8 is not a multicast node. Cilium's own multicast guide requires a 5.10 kernel on AMD64, and the combination that actually forwarded was RHEL 9 plus Cilium 1.19.2 or 1.19.3. The unit tests need Python only for the fixture generator and the simulation; the C tests themselves are C11.
 
 ## Image
 

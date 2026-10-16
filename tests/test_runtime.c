@@ -443,6 +443,12 @@ static void test_quiet_subscriber_and_queue(void) {
     igmp_actual rows[8];
     int nr = igmp_parse_cilium_subscribers(list, rows, 8);
     expect(nr == 2 && rows[0].remote == 0 && rows[1].remote == 1, "cilium list parse");
+    const char *v119 = "Group           Subscriber      Type\n"
+                       "239.1.1.1       10.1.1.5        Local\n"
+                       "239.1.1.1       10.244.1.86     Remote Node\n";
+    nr = igmp_parse_cilium_subscribers(v119, rows, 8);
+    expect(nr == 2 && rows[0].remote == 0 && rows[1].remote == 1 && rows[1].addr == ip4("10.244.1.86"),
+           "cilium 1.19 Remote Node type");
     igmp_runtime_free(rt);
     free(dir);
 }

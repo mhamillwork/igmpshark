@@ -8,8 +8,9 @@ image:
 nameOverride: ""
 
 # Cilium agent image used only to copy a matching cilium-dbg into the pod.
-# Leave empty to use whatever cilium-dbg is already on PATH in the image
-# (the image does not bundle cilium-dbg; the versions must match the agent).
+# Multicast nodes are RHEL 9 with Cilium 1.19.2 or 1.19.3. Set this to that
+# cluster's image, for example quay.io/cilium/cilium:v1.19.3. The image does
+# not bundle cilium-dbg; a binary from a different release is not safe.
 cilium:
   image: ""
   dbgPath: /usr/bin/cilium-dbg

@@ -29,7 +29,7 @@ Default timers are the IGMPv2/v3 values (query interval 125 s). See `docs/OPERAT
 Wireshark must be exactly 4.2.6. The daemon links `libwireshark`, `libwiretap`, and `libwsutil` and refuses any other version.
 
 ```sh
-sudo ./scripts/deps-debian.sh build          # or scripts/deps-rhel.sh on RHEL 8/9
+sudo ./scripts/deps-debian.sh build          # or scripts/deps-rhel.sh on RHEL 9
 NATIVE=0 ./scripts/build-wireshark-4.2.6.sh "$HOME/wireshark-4.2.6"
 WS=$HOME/wireshark-4.2.6 ./scripts/build.sh
 # binary: build/run/igmpshark
@@ -90,7 +90,7 @@ docker compose -f tests/sim/compose.yaml run --rm sim
 helm install igmpshark chart/igmpshark \
   --set image.repository=igmpshark \
   --set image.tag=local \
-  --set cilium.image=quay.io/cilium/cilium:1.16.3 \
+  --set cilium.image=quay.io/cilium/cilium:v1.19.3 \
   --set config.dryRun=true
 ```
 
@@ -102,7 +102,9 @@ HTTP: `/healthz`, `/readyz` (body `degraded` while no querier is known; HTTP 200
 
 ## Cilium, in one paragraph
 
-Three different things are easy to mix up. A pod's membership is protocol state inside igmpshark. Local forwarding is a Cilium subscriber-map entry keyed by the pod's source address and inserted by Cilium's own IGMP handler, which drops the report unless the group map already exists. Remote forwarding is a subscriber-map entry keyed by the other node's CiliumNode internal IP, not by a pod IP. `cilium-dbg bpf multicast subscriber add` sets the remote flag, so igmpshark never uses it for a pod address. Stale local entries are removed with `subscriber delete <group> <pod-source-ip>`. `group delete` wipes every subscriber of that group and is used only when nothing managed or unmanaged remains. Details, including what was read in Cilium 1.16/1.17, are in `docs/CILIUM.md`.
+Multicast nodes are RHEL 9 running Cilium 1.19.2 or 1.19.3. Set `cilium.image` to that cluster's image (`v1.19.2` or `v1.19.3`); the chart only copies `cilium-dbg` out of it.
+
+Three different things are easy to mix up. A pod's membership is protocol state inside igmpshark. Local forwarding is a Cilium subscriber-map entry keyed by the pod's source address and inserted by Cilium's own IGMP handler, which does not record the subscriber until the group map exists. Remote forwarding is a subscriber-map entry keyed by the other node's CiliumNode internal IP, not by a pod IP. `cilium-dbg bpf multicast subscriber add` marks the entry remote, so igmpshark never uses it for a pod address. Stale local entries are removed with `subscriber delete <group> <pod-source-ip>`. `group delete` wipes every subscriber of that group and is used only when nothing managed or unmanaged remains. Details are in `docs/CILIUM.md`.
 
 ## Layout
 

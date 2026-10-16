@@ -190,6 +190,8 @@ typedef struct cli_ctx {
     int timeout_ms;
 } cli_ctx;
 
+/* Cilium 1.19 prints the remote type as "Remote Node". The first token is
+ * enough: anything starting with "R" is a CiliumNode address, not a pod. */
 int igmp_parse_cilium_subscribers(const char *text, igmp_actual *rows, int cap) {
     if (!text || !rows || cap < 1)
         return -1;
