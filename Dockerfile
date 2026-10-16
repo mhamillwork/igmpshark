@@ -39,7 +39,7 @@ RUN NATIVE=0 \
 FROM registry.access.redhat.com/ubi9/ubi:9.8
 RUN dnf -y install \
         glib2 libgcrypt libgpg-error libpcap pcre pcre2 zlib libxml2 lz4-libs libzstd \
-        libnghttp2 brotli krb5-libs libssh libcurl xz-libs ca-certificates \
+        libnghttp2 brotli krb5-libs libssh xz-libs ca-certificates \
     && dnf clean all
 COPY --from=build /opt/igmpshark/igmpshark /usr/local/bin/igmpshark
 COPY --from=build /opt/igmpshark/lib/ /usr/local/lib/igmpshark/
