@@ -77,7 +77,7 @@ The simulation uses the real binary, a file backend, and a shared snapshot direc
 python3 tests/sim/run_local.py ./build/run/igmpshark
 ```
 
-Compose runs that same script inside the image (the image build compiles Wireshark and is slow):
+Compose runs that same script inside the image. The image is UBI 9. Its build installs `flex`, `c-ares`, and `c-ares-devel` with dnf, then compiles Wireshark 4.2.6, and is slow:
 
 ```sh
 docker build -t igmpshark:local .

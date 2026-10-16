@@ -1,13 +1,12 @@
 # Build libwireshark, libwiretap, and libwsutil 4.2.6 on UBI 9.
 # The Wireshark GUI, tshark, and the other tools are not built.
 #
-# UBI 9 (RHEL 9.8) has no wireshark package. Its AppStream Wireshark, on a
-# subscribed host, is 3.4.10, which is not the library this tree links.
-# flex and c-ares-devel are also absent from the UBI repos, and Wireshark's
-# CMake setup requires both, so those two are built from upstream tarballs.
-# gnutls-devel, speexdsp-devel, and libmaxminddb-devel are absent too.
-# SpeexDSP is only required for the GUI and sharkd, which this build turns
-# off. GnuTLS and MaxMindDB are optional and stay disabled.
+# UBI 9 has no wireshark package. RHEL 9 AppStream ships 3.4.10, which is
+# not the library this tree links. flex, c-ares, and c-ares-devel are
+# installed with dnf (scripts/install-flex-c-ares.sh). gnutls-devel,
+# speexdsp-devel, and libmaxminddb-devel are not in the UBI repos. SpeexDSP
+# is only required for the GUI and sharkd, which this build turns off.
+# GnuTLS and MaxMindDB are optional and stay disabled.
 #
 #   docker build -f Dockerfile.build-libwireshark -t igmpshark-libwireshark:ubi9 .
 #
@@ -25,36 +24,8 @@ RUN dnf -y install \
         xz tar gzip ca-certificates diffutils findutils \
     && dnf clean all
 
-# flex 2.6.4 is the flex release RHEL 9 packages. c-ares 1.34.5 is above
-# Wireshark 4.2.6's minimum of 1.13.
-ARG FLEX_VERSION=2.6.4
-ARG FLEX_SHA256=e87aae032bf07c26f85ac0ed3250998c37621d95f8bd748b31f15b33c45ee995
-ARG CARES_VERSION=1.34.5
-ARG CARES_SHA256=7d935790e9af081c25c495fd13c2cfcda4792983418e96358ef6e7320ee06346
-
-RUN curl -fsSL -o /tmp/flex.tar.gz \
-        "https://github.com/westes/flex/releases/download/v${FLEX_VERSION}/flex-${FLEX_VERSION}.tar.gz" \
-    && echo "${FLEX_SHA256}  /tmp/flex.tar.gz" | sha256sum -c - \
-    && tar -xzf /tmp/flex.tar.gz -C /tmp \
-    && cd "/tmp/flex-${FLEX_VERSION}" \
-    && ./configure --prefix=/usr --disable-libfl \
-    && make -j"$(nproc)" \
-    && make install \
-    && rm -rf /tmp/flex.tar.gz "/tmp/flex-${FLEX_VERSION}" \
-    && flex --version
-
-RUN curl -fsSL -o /tmp/c-ares.tar.gz \
-        "https://github.com/c-ares/c-ares/releases/download/v${CARES_VERSION}/c-ares-${CARES_VERSION}.tar.gz" \
-    && echo "${CARES_SHA256}  /tmp/c-ares.tar.gz" | sha256sum -c - \
-    && tar -xzf /tmp/c-ares.tar.gz -C /tmp \
-    && cd "/tmp/c-ares-${CARES_VERSION}" \
-    && ./configure --prefix=/usr --libdir=/usr/lib64 --disable-static \
-    && make -j"$(nproc)" \
-    && make install \
-    && ldconfig \
-    && rm -rf /tmp/c-ares.tar.gz "/tmp/c-ares-${CARES_VERSION}" \
-    && test -f /usr/include/ares.h \
-    && test -e /usr/lib64/libcares.so
+COPY scripts/install-flex-c-ares.sh /tmp/install-flex-c-ares.sh
+RUN chmod +x /tmp/install-flex-c-ares.sh && /tmp/install-flex-c-ares.sh
 
 COPY scripts/build-wireshark-4.2.6.sh /tmp/build-wireshark-4.2.6.sh
 RUN chmod +x /tmp/build-wireshark-4.2.6.sh \

@@ -75,6 +75,8 @@ Do not link the RHEL wireshark RPM; it is not 4.2.6. RHEL 8 can still compile th
 
 ## Image
 
+The image is UBI 9. It installs `flex`, `c-ares`, and `c-ares-devel` with dnf, then compiles libwireshark 4.2.6.
+
 ```sh
 docker build -t igmpshark:local .
 # disconnected: copy the tarball to third_party/wireshark-4.2.6.tar.xz first
