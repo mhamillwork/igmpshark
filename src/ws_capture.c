@@ -4,7 +4,7 @@
  * epan_free, epan_cleanup, wtap_cleanup. PostgreSQL and reassembly-hold
  * behavior from that program is intentionally not included.
  *
- * Wireshark 4.2.6 is GPL-2.0-or-later. This file is GPL-2.0-or-later.
+ * Wireshark 4.6.9 is GPL-2.0-or-later. This file is GPL-2.0-or-later.
  */
 #include "ws_capture.h"
 
@@ -14,8 +14,8 @@
 #include <epan/packet.h>
 #include <epan/prefs.h>
 #include <epan/proto.h>
-#include <epan/tvbuff.h>
 #include <wiretap/wtap.h>
+#include <wsutil/buffer.h>
 #include <wsutil/filesystem.h>
 #include <wsutil/privileges.h>
 #include <wsutil/wslog.h>
@@ -61,15 +61,15 @@ int ws_capture_version(int *major, int *minor, int *micro) {
 int ws_capture_init(void) {
     int major = 0, minor = 0, micro = 0;
     ws_capture_version(&major, &minor, &micro);
-    if (major != 4 || minor != 2 || micro != 6) {
-        fprintf(stderr, "igmpshark requires libwireshark 4.2.6, found %d.%d.%d\n",
+    if (major != 4 || minor != 6 || micro != 9) {
+        fprintf(stderr, "igmpshark requires libwireshark 4.6.9, found %d.%d.%d\n",
                 major, minor, micro);
         return -1;
     }
-    ws_log_init("igmpshark", vcmdarg_err);
+    ws_log_init(vcmdarg_err);
     ws_log_set_level(LOG_LEVEL_WARNING);
     init_process_policies();
-    char *cfg_err = configuration_init("igmpshark", NULL);
+    char *cfg_err = configuration_init("igmpshark");
     if (cfg_err) {
         fprintf(stderr, "configuration_init: %s\n", cfg_err);
         g_free(cfg_err);
@@ -129,20 +129,19 @@ int ws_capture_frame_is_igmp(const uint8_t *frame, uint32_t caplen, uint32_t wir
     if (fno == UINT32_MAX)
         ws_capture_reset_session();
     wtap_rec rec;
-    wtap_rec_init(&rec);
-    rec.rec_type = REC_TYPE_PACKET;
+    wtap_rec_init(&rec, caplen);
+    wtap_setup_packet_rec(&rec, wtap_encap);
     rec.presence_flags = WTAP_HAS_TS | WTAP_HAS_CAP_LEN;
     rec.ts.secs = 0;
     rec.ts.nsecs = 0;
     rec.rec_header.packet_header.caplen = caplen;
     rec.rec_header.packet_header.len = wirelen < caplen ? caplen : wirelen;
-    rec.rec_header.packet_header.pkt_encap = wtap_encap;
+    ws_buffer_append(&rec.data, frame, caplen);
     last_ts = rec.ts;
     frame_data fd;
     frame_data_init(&fd, ++fno, &rec, 0, 0);
-    epan_dissect_run(edt, WTAP_FILE_TYPE_SUBTYPE_UNKNOWN, &rec,
-                     tvb_new_real_data(frame, caplen, rec.rec_header.packet_header.len),
-                     &fd, NULL);
+    /* 4.6 reads the bytes from rec->data. It does not take a tvbuff. */
+    epan_dissect_run(edt, WTAP_FILE_TYPE_SUBTYPE_UNKNOWN, &rec, &fd, NULL);
     int hit = layer_has_igmp(&edt->pi);
     epan_dissect_reset(edt);
     frame_data_destroy(&fd);

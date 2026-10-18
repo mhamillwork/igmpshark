@@ -10,7 +10,7 @@ IPv6 MLD is not implemented. Cilium multicast is group-level; source lists are t
 | --- | --- |
 | Unit tests `test_igmp` and `test_runtime` | passed |
 | AddressSanitizer and UndefinedBehaviorSanitizer on those tests | passed |
-| libwireshark 4.2.6 dissection of `tests/fixtures/igmp.pcap` and `igmp.pcapng` | passed (`test_ws`, 3 IGMP frames each, truncated and TCP rejected) |
+| libwireshark 4.6.9 dissection of `tests/fixtures/igmp.pcap` and `igmp.pcapng` | passed (`test_ws`, 3 IGMP frames each, truncated and TCP rejected) |
 | Multi-process file-backend simulation `tests/sim/run_local.py` | passed |
 | Offline `--pcap` replay | run as part of the commands below |
 | Docker Compose image | not built in this environment |
@@ -26,12 +26,12 @@ Default timers are the IGMPv2/v3 values (query interval 125 s). See `docs/OPERAT
 
 ## Build
 
-Wireshark must be exactly 4.2.6. The daemon links `libwireshark`, `libwiretap`, and `libwsutil` and refuses any other version.
+Wireshark must be exactly 4.6.9. The release tarball is `third_party/wireshark-4.6.9.tar.xz`, so the build does not download it. The daemon links `libwireshark`, `libwiretap`, and `libwsutil` and refuses any other version.
 
 ```sh
 sudo ./scripts/deps-debian.sh build          # or scripts/deps-rhel.sh on RHEL 9
-NATIVE=0 ./scripts/build-wireshark-4.2.6.sh "$HOME/wireshark-4.2.6"
-WS=$HOME/wireshark-4.2.6 ./scripts/build.sh
+NATIVE=0 ./scripts/build-wireshark-4.6.9.sh "$HOME/wireshark-4.6.9"
+WS=$HOME/wireshark-4.6.9 ./scripts/build.sh
 # binary: build/run/igmpshark
 ```
 
@@ -61,7 +61,7 @@ gcc -std=c11 -Wall -Wextra -Wno-unused-parameter -D_GNU_SOURCE -fsanitize=addres
 
 ```sh
 python3 tests/fixtures/gen_pcap.py tests/fixtures
-WS=$HOME/wireshark-4.2.6 ./scripts/build.sh
+WS=$HOME/wireshark-4.6.9 ./scripts/build.sh
 ./build/run/test_ws tests/fixtures/igmp.pcap tests/fixtures/igmp.pcapng
 ./build/run/igmpshark --pcap tests/fixtures/igmp.pcap --backend file \
   --state /tmp/igmp-pcap.tsv --node-name replay --node-ip 10.0.0.1 --startup-grace-ms 0
@@ -77,7 +77,7 @@ The simulation uses the real binary, a file backend, and a shared snapshot direc
 python3 tests/sim/run_local.py ./build/run/igmpshark
 ```
 
-Compose runs that same script inside the image. The image is UBI 9. Its build installs `flex`, `c-ares`, and `c-ares-devel` with dnf, then compiles Wireshark 4.2.6, and is slow:
+Compose runs that same script inside the image. The image is UBI 9. Its build installs `flex`, `c-ares`, and `c-ares-devel` with dnf, then compiles the vendored Wireshark 4.6.9, and is slow:
 
 ```sh
 docker build -t igmpshark:local .
@@ -111,7 +111,8 @@ Three different things are easy to mix up. A pod's membership is protocol state 
 - `src/` protocol engine, capture, Cilium file/CLI backends, Kubernetes watch
 - `chart/igmpshark` DaemonSet, ServiceAccount, RBAC
 - `docs/` architecture, Cilium notes, operations
-- `scripts/` Wireshark 4.2.6 build and dependency lists
+- `scripts/` Wireshark 4.6.9 build and dependency lists
+- `third_party/wireshark-4.6.9.tar.xz` Wireshark 4.6.9 source used by that build
 - `tests/` unit tests, fixtures, multi-process simulation, cluster script
 
 The attached `sqlshark-cursor-jsonb-promotion-races-94e7.zip` is the dbshark reference and is not part of the build. License notices for the adapted files are in `LICENSE`.

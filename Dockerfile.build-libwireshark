@@ -1,5 +1,6 @@
-# Build libwireshark, libwiretap, and libwsutil 4.2.6 on UBI 9.
+# Build libwireshark, libwiretap, and libwsutil 4.6.9 on UBI 9.
 # The Wireshark GUI, tshark, and the other tools are not built.
+# The source is third_party/wireshark-4.6.9.tar.xz in this tree.
 #
 # UBI 9 has no wireshark package. RHEL 9 AppStream ships 3.4.10, which is
 # not the library this tree links. flex, c-ares, and c-ares-devel are
@@ -10,7 +11,7 @@
 #
 #   docker build -f Dockerfile.build-libwireshark -t igmpshark-libwireshark:ubi9 .
 #
-# Libraries land in /opt/wireshark-4.2.6/build/run/.
+# Libraries land in /opt/wireshark-4.6.9/build/run/.
 
 FROM registry.access.redhat.com/ubi9/ubi:9.8
 
@@ -27,13 +28,14 @@ RUN dnf -y install \
 COPY scripts/install-flex-c-ares.sh /tmp/install-flex-c-ares.sh
 RUN chmod +x /tmp/install-flex-c-ares.sh && /tmp/install-flex-c-ares.sh
 
-COPY scripts/build-wireshark-4.2.6.sh /tmp/build-wireshark-4.2.6.sh
-RUN chmod +x /tmp/build-wireshark-4.2.6.sh \
-    && NATIVE=0 /tmp/build-wireshark-4.2.6.sh /opt/wireshark-4.2.6 \
-    && test -e /opt/wireshark-4.2.6/build/run/libwireshark.so \
-    && test -e /opt/wireshark-4.2.6/build/run/libwiretap.so \
-    && test -e /opt/wireshark-4.2.6/build/run/libwsutil.so \
-    && ldd /opt/wireshark-4.2.6/build/run/libwireshark.so \
-    && grep -a -q '4.2.6' /opt/wireshark-4.2.6/build/run/libwireshark.so /opt/wireshark-4.2.6/build/run/libwsutil.so
+COPY third_party/wireshark-4.6.9.tar.xz /tmp/third_party/wireshark-4.6.9.tar.xz
+COPY scripts/build-wireshark-4.6.9.sh /tmp/scripts/build-wireshark-4.6.9.sh
+RUN chmod +x /tmp/scripts/build-wireshark-4.6.9.sh \
+    && NATIVE=0 /tmp/scripts/build-wireshark-4.6.9.sh /opt/wireshark-4.6.9 \
+    && test -e /opt/wireshark-4.6.9/build/run/libwireshark.so \
+    && test -e /opt/wireshark-4.6.9/build/run/libwiretap.so \
+    && test -e /opt/wireshark-4.6.9/build/run/libwsutil.so \
+    && ldd /opt/wireshark-4.6.9/build/run/libwireshark.so \
+    && grep -a -q '4.6.9' /opt/wireshark-4.6.9/build/run/libwireshark.so /opt/wireshark-4.6.9/build/run/libwsutil.so
 
-WORKDIR /opt/wireshark-4.2.6/build/run
+WORKDIR /opt/wireshark-4.6.9/build/run

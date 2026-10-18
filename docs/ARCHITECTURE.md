@@ -5,7 +5,7 @@ igmpshark is one process per node. Protocol state, the Kubernetes pod table, and
 ## Pipeline
 
 1. libpcap captures on the configured interfaces with BPF filter `igmp`, or reads a pcap/pcapng file and exits.
-2. libwireshark 4.2.6 dissects the frame. A frame the IGMP dissector does not accept is ignored. Linux cooked capture (`any`, DLT_LINUX_SLL / SLL2) is mapped to the same parser as Ethernet.
+2. libwireshark 4.6.9 dissects the frame. A frame the IGMP dissector does not accept is ignored. Linux cooked capture (`any`, DLT_LINUX_SLL / SLL2) is mapped to the same parser as Ethernet.
 3. The parser checks the IPv4 and IGMP checksums and rejects truncated or non-routable groups (`224.0.0.0/24` is ignored).
 4. The engine updates membership. A 50 ms dedup window suppresses the same frame observed on two interfaces. An identical report outside that window is a refresh.
 5. When `--kube` has completed one pod list, a report is accepted only if its source address is a current pod on this node. The packet source alone is not a membership identity.

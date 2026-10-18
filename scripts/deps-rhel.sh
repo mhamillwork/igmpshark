@@ -2,7 +2,8 @@
 # RHEL 8 / RHEL 9 (and AlmaLinux, Rocky, CentOS Stream) build dependencies.
 # Adapted from the dbshark deps-rhel.sh in the attached sqlshark zip.
 # PostgreSQL is omitted. CodeReady Builder / CRB / PowerTools is enabled for
-# speexdsp-devel and libmaxminddb-devel, which Wireshark 4.2.6's build uses.
+# speexdsp-devel and libmaxminddb-devel. The library build turns the GUI
+# and sharkd off, so those two are not required for libwireshark.
 set -eu
 MODE=${1:-all}
 . /etc/os-release

@@ -69,17 +69,16 @@ The DaemonSet runs as root so it can open raw sockets. It drops all capabilities
 
 ## RHEL
 
-Multicast runs on RHEL 9 nodes with Cilium 1.19.2 or 1.19.3. Build the agent there with `sudo ./scripts/deps-rhel.sh`, then the Wireshark and igmpshark commands in the README. The Wireshark tarball URL and sha256 are in `scripts/build-wireshark-4.2.6.sh`. For a disconnected build, place an already extracted Wireshark 4.2.6 tree on the install path the script checks, and load the image with `podman load` or `docker load`.
+Multicast runs on RHEL 9 nodes with Cilium 1.19.2 or 1.19.3. Build the agent there with `sudo ./scripts/deps-rhel.sh`, then the Wireshark and igmpshark commands in the README. Wireshark 4.6.9 source is already in `third_party/wireshark-4.6.9.tar.xz`. `scripts/build-wireshark-4.6.9.sh` checks that file's sha256 and extracts it. It does not download Wireshark. Load a built image with `podman load` or `docker load`.
 
-Do not link the RHEL wireshark RPM; it is not 4.2.6. RHEL 8 can still compile this C program, and `scripts/deps-rhel.sh` accepts it for that, but RHEL 8 is not a multicast node. Cilium's own multicast guide requires a 5.10 kernel on AMD64, and the combination that actually forwarded was RHEL 9 plus Cilium 1.19.2 or 1.19.3. The unit tests need Python only for the fixture generator and the simulation; the C tests themselves are C11.
+Do not link the RHEL wireshark RPM; it is 3.4.10 on RHEL 9. RHEL 8 can still compile this C program, and `scripts/deps-rhel.sh` accepts it for that, but RHEL 8 is not a multicast node. Cilium's own multicast guide requires a 5.10 kernel on AMD64, and the combination that actually forwarded was RHEL 9 plus Cilium 1.19.2 or 1.19.3. The unit tests need Python only for the fixture generator and the simulation; the C tests themselves are C11.
 
 ## Image
 
-The image is UBI 9. It installs `flex`, `c-ares`, and `c-ares-devel` with dnf, then compiles libwireshark 4.2.6.
+The image is UBI 9. It installs `flex`, `c-ares`, and `c-ares-devel` with dnf, then compiles libwireshark 4.6.9 from `third_party/wireshark-4.6.9.tar.xz`.
 
 ```sh
 docker build -t igmpshark:local .
-# disconnected: copy the tarball to third_party/wireshark-4.2.6.tar.xz first
 docker save igmpshark:local | gzip > igmpshark.tar.gz
 docker load < igmpshark.tar.gz
 ```

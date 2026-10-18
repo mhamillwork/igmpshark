@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* libwireshark 4.2.6 dissection. Returns 1 if the igmp dissector accepted
+/* libwireshark 4.6.9 dissection. Returns 1 if the igmp dissector accepted
  * the frame, 0 if it did not, -1 if epan is unavailable or failed. */
 int ws_capture_init(void);
 int ws_capture_frame_is_igmp(const uint8_t *frame, uint32_t caplen, uint32_t wirelen,

@@ -5,7 +5,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/run)
 
-option(IGMPSHARK_WITH_WIRESHARK "Build the igmpshark executable against libwireshark 4.2.6" ON)
+option(IGMPSHARK_WITH_WIRESHARK "Build the igmpshark executable against libwireshark 4.6.9" ON)
 
 find_package(PkgConfig REQUIRED)
 
@@ -37,7 +37,7 @@ add_test(NAME test_igmp COMMAND test_igmp)
 add_test(NAME test_runtime COMMAND test_runtime)
 
 if(IGMPSHARK_WITH_WIRESHARK)
-    set(WIRESHARK_ROOT "" CACHE PATH "Wireshark 4.2.6 source tree")
+    set(WIRESHARK_ROOT "" CACHE PATH "Wireshark 4.6.9 source tree")
     set(WIRESHARK_LIBRARY_DIR "" CACHE PATH "Directory containing libwireshark.so")
     pkg_check_modules(GLIB REQUIRED glib-2.0)
     pkg_check_modules(PCAP REQUIRED libpcap)
@@ -48,18 +48,18 @@ if(IGMPSHARK_WITH_WIRESHARK)
     find_library(WS_WIRETAP wiretap HINTS ${WIRESHARK_LIBRARY_DIR} ${WIRESHARK_ROOT}/build/run)
     find_library(WS_WSUTIL wsutil HINTS ${WIRESHARK_LIBRARY_DIR} ${WIRESHARK_ROOT}/build/run)
     if(NOT WS_INCLUDE OR NOT WS_WIRESHARK)
-        message(FATAL_ERROR "Wireshark 4.2.6 not found. Set WIRESHARK_ROOT or pass -DIGMPSHARK_WITH_WIRESHARK=OFF")
+        message(FATAL_ERROR "Wireshark 4.6.9 not found. Set WIRESHARK_ROOT or pass -DIGMPSHARK_WITH_WIRESHARK=OFF")
     endif()
     if(EXISTS "${WS_INCLUDE}/ws_version.h.in")
         file(READ "${WS_INCLUDE}/CMakeLists.txt" ws_project)
         if(NOT ws_project MATCHES "set\\(PROJECT_MAJOR_VERSION 4\\)" OR
-           NOT ws_project MATCHES "set\\(PROJECT_MINOR_VERSION 2\\)" OR
-           NOT ws_project MATCHES "set\\(PROJECT_PATCH_VERSION 6\\)")
-            message(FATAL_ERROR "WIRESHARK_ROOT is not Wireshark 4.2.6")
+           NOT ws_project MATCHES "set\\(PROJECT_MINOR_VERSION 6\\)" OR
+           NOT ws_project MATCHES "set\\(PROJECT_PATCH_VERSION 9\\)")
+            message(FATAL_ERROR "WIRESHARK_ROOT is not Wireshark 4.6.9")
         endif()
         set(PROJECT_MAJOR_VERSION 4)
-        set(PROJECT_MINOR_VERSION 2)
-        set(PROJECT_PATCH_VERSION 6)
+        set(PROJECT_MINOR_VERSION 6)
+        set(PROJECT_PATCH_VERSION 9)
         configure_file("${WS_INCLUDE}/ws_version.h.in" "${CMAKE_BINARY_DIR}/ws_version.h" @ONLY)
     endif()
 

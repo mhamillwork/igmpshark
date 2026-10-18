@@ -90,7 +90,7 @@ int main(int argc, char **argv) {
     if (ws_capture_init() != 0)
         return 1;
     ws_capture_version(&major, &minor, &micro);
-    expect(major == 4 && minor == 2 && micro == 6, "libwireshark 4.2.6");
+    expect(major == 4 && minor == 6 && micro == 9, "libwireshark 4.6.9");
     for (int i = 1; i < argc; i++) {
         if (replay(argv[i]) != 0)
             failures++;

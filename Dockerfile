@@ -1,7 +1,8 @@
-# UBI 9 image. libwireshark 4.2.6 is compiled here because UBI 9 does not
-# ship that library. flex, c-ares, and c-ares-devel come from dnf
-# (scripts/install-flex-c-ares.sh). The Wireshark tarball is fetched during
-# the build unless third_party/wireshark-4.2.6.tar.xz is in the context.
+# UBI 9 image. libwireshark 4.6.9 is compiled from
+# third_party/wireshark-4.6.9.tar.xz, which is part of this tree, so the
+# build does not download Wireshark. UBI 9 does not ship that library.
+# flex, c-ares, and c-ares-devel come from dnf
+# (scripts/install-flex-c-ares.sh).
 # No kubeconfig or credentials are copied into the image.
 
 FROM registry.access.redhat.com/ubi9/ubi:9.8 AS build
@@ -21,27 +22,22 @@ COPY . /src
 RUN chmod +x scripts/install-flex-c-ares.sh \
     && ./scripts/install-flex-c-ares.sh
 
-ARG WS_TARBALL=third_party/wireshark-4.2.6.tar.xz
-RUN if [ -f "$WS_TARBALL" ]; then \
-        mkdir -p /opt/wireshark-4.2.6 && tar -xJf "$WS_TARBALL" --strip-components=1 -C /opt/wireshark-4.2.6; \
-    fi
-RUN NATIVE=0 \
-        sh -c 'if [ -f /opt/wireshark-4.2.6/CMakeLists.txt ]; then mkdir -p "$HOME" && rm -rf "$HOME/wireshark-4.2.6" && mv /opt/wireshark-4.2.6 "$HOME/wireshark-4.2.6"; fi; \
-               ./scripts/build-wireshark-4.2.6.sh "$HOME/wireshark-4.2.6"' \
-    && WS="$HOME/wireshark-4.2.6" ./scripts/build.sh \
+RUN chmod +x scripts/build-wireshark-4.6.9.sh \
+    && NATIVE=0 ./scripts/build-wireshark-4.6.9.sh /opt/wireshark-4.6.9 \
+    && WS=/opt/wireshark-4.6.9 ./scripts/build.sh \
     && mkdir -p /opt/igmpshark/lib \
-    && cp build/run/igmpshark /opt/igmpshark/igmpshark \
-    && cp "$HOME/wireshark-4.2.6/build/run"/libwireshark.so* /opt/igmpshark/lib/ \
-    && cp "$HOME/wireshark-4.2.6/build/run"/libwiretap.so* /opt/igmpshark/lib/ \
-    && cp "$HOME/wireshark-4.2.6/build/run"/libwsutil.so* /opt/igmpshark/lib/ \
+    && cp -a build/run/igmpshark /opt/igmpshark/igmpshark \
+    && cp -a /opt/wireshark-4.6.9/build/run/libwireshark.so* /opt/igmpshark/lib/ \
+    && cp -a /opt/wireshark-4.6.9/build/run/libwiretap.so* /opt/igmpshark/lib/ \
+    && cp -a /opt/wireshark-4.6.9/build/run/libwsutil.so* /opt/igmpshark/lib/ \
     && cp -a /usr/lib64/libcares.so.2* /opt/igmpshark/lib/
 
 FROM registry.access.redhat.com/ubi9/ubi:9.8
 # libcurl-minimal is already installed and provides libcurl.so.4. The libcurl
 # package conflicts with it.
 RUN dnf -y install \
-        glib2 libgcrypt libgpg-error libpcap pcre pcre2 zlib libxml2 lz4-libs libzstd \
-        libnghttp2 brotli krb5-libs libssh xz-libs ca-certificates \
+        glib2 libgcrypt libgpg-error libpcap pcre pcre2 zlib libxml2 libicu lz4-libs libzstd \
+        libnghttp2 brotli krb5-libs libssh libstdc++ xz-libs ca-certificates \
     && dnf clean all
 COPY --from=build /opt/igmpshark/igmpshark /usr/local/bin/igmpshark
 COPY --from=build /opt/igmpshark/lib/ /usr/local/lib/igmpshark/
