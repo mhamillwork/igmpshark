@@ -1,0 +1,16 @@
+# Multi-process simulation inside one container. The runner executes
+# tests/sim/run_local.py, which starts one igmpshark process per node against
+# a shared snapshot directory and a file backend. This does not install Cilium
+# and is not evidence of datapath forwarding.
+services:
+  sim:
+    image: igmpshark:local
+    network_mode: host
+    user: "0"
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    volumes:
+      - ../..:/src:ro
+    entrypoint: ["python3", "/src/tests/sim/run_local.py", "/usr/local/bin/igmpshark"]
+    working_dir: /tmp

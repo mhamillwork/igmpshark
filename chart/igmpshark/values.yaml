@@ -1,0 +1,84 @@
+replicaCount: 1
+
+image:
+  repository: igmpshark
+  tag: local
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+
+# Cilium agent image used only to copy a matching cilium-dbg into the pod.
+# Multicast nodes are RHEL 9 with Cilium 1.19.2 or 1.19.3. Set this to that
+# cluster's image, for example quay.io/cilium/cilium:v1.19.3. The image does
+# not bundle cilium-dbg; a binary from a different release is not safe.
+cilium:
+  image: ""
+  dbgPath: /usr/bin/cilium-dbg
+  socketHostPath: /var/run/cilium
+
+config:
+  backend: cilium
+  interfaces: ["any"]
+  dryRun: false
+  activeQuerier: false
+  immediateLeave: false
+  kube: true
+  kubeCoord: true
+  coordDir: /var/lib/igmpshark/coord
+  statePath: /var/lib/igmpshark/state.tsv
+  ledgerPath: /var/lib/igmpshark/ledger.tsv
+  listen: "0.0.0.0:9080"
+  queryIntervalMs: 125000
+  queryResponseMs: 10000
+  robustness: 2
+  lmqiMs: 1000
+  startupGraceMs: 15000
+  reconcileMs: 5000
+  maxMembers: 1024
+  logJson: true
+
+serviceAccount:
+  create: true
+  name: ""
+
+rbac:
+  create: true
+
+podSecurityContext: {}
+
+securityContext:
+  runAsUser: 0
+  runAsNonRoot: false
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop: ["ALL"]
+    add: ["NET_RAW", "NET_ADMIN"]
+
+# hostNetwork is required to capture pod veth / cilium interfaces in the host
+# network namespace. It does not by itself make IGMP visible: set
+# config.interfaces to the interfaces that actually carry the traffic
+# (often "any", which is Linux cooked capture, or specific lxc*/cilium_host
+# devices). Confirm with a short tcpdump before expecting joins.
+hostNetwork: true
+dnsPolicy: ClusterFirstWithHostNet
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+probes:
+  port: 9080
+
+volumes:
+  # BPF filesystem is mounted read-only for diagnosis. Mutations go through
+  # the agent socket, not by writing maps from this container.
+  bpffs: /sys/fs/bpf

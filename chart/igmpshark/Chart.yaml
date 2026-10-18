@@ -1,0 +1,6 @@
+apiVersion: v2
+name: igmpshark
+description: IGMP snooping agent that reconciles Cilium multicast membership
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

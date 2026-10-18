@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc python3
+          chmod +x scripts/test.sh
+          ./scripts/test.sh
+          gcc -std=c11 -Wall -Wextra -Wno-unused-parameter -D_GNU_SOURCE -fsanitize=address,undefined -I src \
+            -o build/test_igmp_asan src/igmp_parse.c src/engine.c src/reconcile.c tests/test_igmp.c
+          gcc -std=c11 -Wall -Wextra -Wno-unused-parameter -D_GNU_SOURCE -fsanitize=address,undefined -I src \
+            -o build/test_runtime_asan src/igmp_parse.c src/engine.c src/reconcile.c src/backend.c \
+            src/pods.c src/coord.c src/runtime.c src/query.c tests/test_runtime.c
+          ./build/test_igmp_asan
+          ./build/test_runtime_asan
+
+  igmpshark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Wireshark 4.6.9 and igmpshark
+        run: |
+          chmod +x scripts/*.sh tests/fixtures/gen_pcap.py tests/sim/run_local.py
+          sudo ./scripts/deps-debian.sh build
+          NATIVE=0 ./scripts/build-wireshark-4.6.9.sh "$HOME/wireshark-4.6.9"
+          WS=$HOME/wireshark-4.6.9 ./scripts/build.sh
+          ctest --test-dir build --output-on-failure
+          python3 tests/sim/run_local.py build/run/igmpshark
+          ./build/run/igmpshark --pcap tests/fixtures/igmp.pcap --backend file \
+            --state /tmp/igmp-pcap.tsv --node-name ci --node-ip 10.0.0.1 --startup-grace-ms 0
