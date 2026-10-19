@@ -19,7 +19,7 @@ jobs:
             -o build/test_igmp_asan src/igmp_parse.c src/engine.c src/reconcile.c tests/test_igmp.c
           gcc -std=c11 -Wall -Wextra -Wno-unused-parameter -D_GNU_SOURCE -fsanitize=address,undefined -I src \
             -o build/test_runtime_asan src/igmp_parse.c src/engine.c src/reconcile.c src/backend.c \
-            src/pods.c src/coord.c src/runtime.c src/query.c tests/test_runtime.c
+            src/pods.c src/coord.c src/runtime.c src/query.c src/kube_parse.c tests/test_runtime.c
           ./build/test_igmp_asan
           ./build/test_runtime_asan
 

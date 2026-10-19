@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 #include "coord.h"
+#include "kube_parse.h"
 #include "query.h"
 #include "runtime.h"
 
@@ -453,6 +454,40 @@ static void test_quiet_subscriber_and_queue(void) {
     free(dir);
 }
 
+static int keep_pod(void *user, const kube_event *ev) {
+    kube_event *slot = user;
+    if (ev->kind == KUBE_EV_UPSERT && strcmp(ev->name, "repbox-0") == 0)
+        *slot = *ev;
+    return 0;
+}
+
+static void test_pod_list_without_kind(void) {
+    const char *json =
+        "{\"kind\":\"PodList\",\"apiVersion\":\"v1\",\"metadata\":{\"resourceVersion\":\"9\"},"
+        "\"items\":["
+        "{\"metadata\":{\"name\":\"pending\",\"namespace\":\"default\",\"uid\":\"u-pending\","
+        "\"deletionTimestamp\":null},\"spec\":{\"nodeName\":\"ws-g3-281\"}},"
+        "{\"metadata\":{\"name\":\"repbox-0\",\"namespace\":\"app\",\"uid\":\"u-repbox\"},"
+        "\"spec\":{\"nodeName\":\"ws-g3-281\"},"
+        "\"status\":{\"podIP\":\"10.42.5.31\",\"podIPs\":[{\"ip\":\"10.42.5.31\"}]}}"
+        "]}";
+    kube_event found;
+    memset(&found, 0, sizeof found);
+    int n = kube_parse_pod_list(json, keep_pod, &found);
+    expect(n == 2, "list items without kind are both read");
+    expect(strcmp(found.name, "repbox-0") == 0, "repbox name");
+    expect(strcmp(found.node, "ws-g3-281") == 0, "repbox node");
+    expect(found.ip == ip4("10.42.5.31"), "repbox podIP is not taken from podIPs of another object");
+    expect(found.kind == KUBE_EV_UPSERT && !found.deleting, "running pod is an upsert");
+
+    const char *watch =
+        "{\"type\":\"MODIFIED\",\"object\":{\"metadata\":{\"name\":\"repbox-0\",\"uid\":\"u-repbox\"},"
+        "\"spec\":{\"nodeName\":\"ws-g3-281\"},\"status\":{\"podIP\":\"10.42.5.31\"}}}";
+    kube_event ev;
+    expect(kube_parse_watch_line(watch, &ev) == 1, "watch line");
+    expect(ev.ip == ip4("10.42.5.31") && strcmp(ev.node, "ws-g3-281") == 0, "watch pod identity");
+}
+
 int main(void) {
     test_dry_and_idempotent();
     test_pod_lifecycle();
@@ -461,6 +496,7 @@ int main(void) {
     test_grace_unmanaged_restart_restore();
     test_refcount_and_querier();
     test_quiet_subscriber_and_queue();
+    test_pod_list_without_kind();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

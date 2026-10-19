@@ -12,7 +12,8 @@ cc=${CC:-gcc}
     -o "$ROOT/build/test_runtime" \
     "$ROOT/src/igmp_parse.c" "$ROOT/src/engine.c" "$ROOT/src/reconcile.c" \
     "$ROOT/src/backend.c" "$ROOT/src/pods.c" "$ROOT/src/coord.c" \
-    "$ROOT/src/runtime.c" "$ROOT/src/query.c" "$ROOT/tests/test_runtime.c"
+    "$ROOT/src/runtime.c" "$ROOT/src/query.c" "$ROOT/src/kube_parse.c" \
+    "$ROOT/tests/test_runtime.c"
 "$ROOT/build/test_igmp"
 "$ROOT/build/test_runtime"
 echo unit-ok

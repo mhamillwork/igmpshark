@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 #include "kube.h"
+#include "kube_parse.h"
 
 #include "igmp_types.h"
 
@@ -199,87 +200,19 @@ static int b64_encode(const char *in, size_t len, char *out, size_t cap) {
     return (int)n;
 }
 
-/* Walk a JSON object that is one Pod and emit an event. */
-static void emit_pod_object(kube_client *k, const char *obj, int watch_deleted) {
-    kube_event ev;
-    memset(&ev, 0, sizeof ev);
-    const char *uid = strstr(obj, "\"uid\"");
-    const char *name = strstr(obj, "\"name\"");
-    const char *node = strstr(obj, "\"nodeName\"");
-    const char *ip = strstr(obj, "\"podIP\"");
-    const char *del = strstr(obj, "\"deletionTimestamp\"");
-    if (!uid || !name)
-        return;
-    const char *p = strchr(uid, ':');
-    if (!p || parse_string(&p, ev.uid, sizeof ev.uid) != 0)
-        return;
-    p = strchr(name, ':');
-    if (!p || parse_string(&p, ev.name, sizeof ev.name) != 0)
-        return;
-    if (node) {
-        p = strchr(node, ':');
-        if (p)
-            parse_string(&p, ev.node, sizeof ev.node);
-    }
-    if (ip) {
-        p = strchr(ip, ':');
-        char text[64];
-        if (p && parse_string(&p, text, sizeof text) == 0)
-            igmp_ip_parse(text, &ev.ip);
-    }
-    ev.deleting = del && del < (ip ? ip : del + 1);
-    const char *rst = obj;
-    while ((rst = strstr(rst, "\"restartCount\"")) != NULL) {
-        int v = 0;
-        if (sscanf(rst, "\"restartCount\"%*[^0-9]%d", &v) == 1 && v > ev.restart)
-            ev.restart = v;
-        rst += 14;
-    }
-    if (watch_deleted || ev.deleting) {
-        ev.kind = KUBE_EV_DELETE;
-        ev.deleting = 1;
-    } else {
-        ev.kind = KUBE_EV_UPSERT;
-    }
-    push_ev(k, &ev);
+static int push_parsed(void *user, const kube_event *ev) {
+    push_ev(user, ev);
+    return 0;
 }
 
 static void scan_items(kube_client *k, const char *json) {
-    const char *items = strstr(json, "\"items\"");
-    if (!items)
-        items = json;
-    const char *p = items;
-    while ((p = strstr(p, "\"kind\"")) != NULL) {
-        const char *kind = strchr(p, ':');
-        char kn[32];
-        if (!kind || parse_string(&kind, kn, sizeof kn) != 0) {
-            p += 6;
-            continue;
-        }
-        if (strcmp(kn, "Pod") != 0) {
-            p = kind;
-            continue;
-        }
-        const char *obj = strstr(p, "\"metadata\"");
-        if (!obj)
-            break;
-        emit_pod_object(k, obj, 0);
-        p = obj + 10;
-    }
+    kube_parse_pod_list(json, push_parsed, k);
 }
 
 static void scan_watch_line(kube_client *k, const char *line) {
-    const char *type = strstr(line, "\"type\"");
-    char tp[32];
-    int deleted = 0;
-    if (type) {
-        const char *p = strchr(type, ':');
-        if (p && parse_string(&p, tp, sizeof tp) == 0 && strcmp(tp, "DELETED") == 0)
-            deleted = 1;
-    }
-    const char *obj = strstr(line, "\"metadata\"");
-    if (obj)
-        emit_pod_object(k, obj, deleted);
+    kube_event ev;
+    if (kube_parse_watch_line(line, &ev))
+        push_ev(k, &ev);
 }
 
 static int http_get(kube_client *k, const char *url, long *code, buf *body) {
@@ -324,8 +257,11 @@ static void *kube_thread(void *arg) {
         if (rvpos) {
             const char *p = strchr(rvpos, ':');
             char tmp[128];
-            if (p && parse_string(&p, tmp, sizeof tmp) == 0)
-                snprintf(rv, sizeof rv, "%s", tmp);
+            if (p) {
+                p = skip_ws(p + 1);
+                if (parse_string(&p, tmp, sizeof tmp) == 0)
+                    snprintf(rv, sizeof rv, "%s", tmp);
+            }
         }
         push_kind(k, KUBE_EV_API_UP);
         push_kind(k, KUBE_EV_BEGIN);

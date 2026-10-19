@@ -20,7 +20,8 @@ add_library(igmpcore STATIC
     pods.c
     coord.c
     runtime.c
-    query.c)
+    query.c
+    kube_parse.c)
 target_include_directories(igmpcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(igmpcore PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_compile_definitions(igmpcore PRIVATE _GNU_SOURCE)
