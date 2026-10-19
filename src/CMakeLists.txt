@@ -5,20 +5,23 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/run)
 
+# This file lives in src/. Tests and fixtures stay at the repository root.
+set(IGMPSHARK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
 option(IGMPSHARK_WITH_WIRESHARK "Build the igmpshark executable against libwireshark 4.6.9" ON)
 
 find_package(PkgConfig REQUIRED)
 
 add_library(igmpcore STATIC
-    src/igmp_parse.c
-    src/engine.c
-    src/reconcile.c
-    src/backend.c
-    src/pods.c
-    src/coord.c
-    src/runtime.c
-    src/query.c)
-target_include_directories(igmpcore PUBLIC ${CMAKE_SOURCE_DIR}/src)
+    igmp_parse.c
+    engine.c
+    reconcile.c
+    backend.c
+    pods.c
+    coord.c
+    runtime.c
+    query.c)
+target_include_directories(igmpcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(igmpcore PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_compile_definitions(igmpcore PRIVATE _GNU_SOURCE)
 
@@ -29,8 +32,8 @@ function(igmp_test name)
     target_compile_definitions(${name} PRIVATE _GNU_SOURCE)
 endfunction()
 
-igmp_test(test_igmp tests/test_igmp.c)
-igmp_test(test_runtime tests/test_runtime.c)
+igmp_test(test_igmp ${IGMPSHARK_ROOT}/tests/test_igmp.c)
+igmp_test(test_runtime ${IGMPSHARK_ROOT}/tests/test_runtime.c)
 
 enable_testing()
 add_test(NAME test_igmp COMMAND test_igmp)
@@ -63,7 +66,7 @@ if(IGMPSHARK_WITH_WIRESHARK)
         configure_file("${WS_INCLUDE}/ws_version.h.in" "${CMAKE_BINARY_DIR}/ws_version.h" @ONLY)
     endif()
 
-    add_executable(igmpshark src/main.c src/ws_capture.c src/kube.c)
+    add_executable(igmpshark main.c ws_capture.c kube.c)
     target_link_libraries(igmpshark PRIVATE igmpcore
         ${WS_WIRESHARK} ${WS_WIRETAP} ${WS_WSUTIL}
         ${GLIB_LIBRARIES} ${PCAP_LIBRARIES} ${CURL_LIBRARIES} pthread)
@@ -77,7 +80,7 @@ if(IGMPSHARK_WITH_WIRESHARK)
             INSTALL_RPATH "${WIRESHARK_ROOT}/build/run")
     endif()
 
-    add_executable(test_ws tests/test_ws.c src/ws_capture.c)
+    add_executable(test_ws ${IGMPSHARK_ROOT}/tests/test_ws.c ws_capture.c)
     target_link_libraries(test_ws PRIVATE igmpcore ${WS_WIRESHARK} ${WS_WIRETAP} ${WS_WSUTIL}
         ${GLIB_LIBRARIES} ${PCAP_LIBRARIES})
     target_include_directories(test_ws PRIVATE
@@ -88,6 +91,6 @@ if(IGMPSHARK_WITH_WIRESHARK)
         set_target_properties(test_ws PROPERTIES BUILD_RPATH "${WIRESHARK_ROOT}/build/run")
     endif()
     add_test(NAME test_ws COMMAND test_ws
-        ${CMAKE_SOURCE_DIR}/tests/fixtures/igmp.pcap
-        ${CMAKE_SOURCE_DIR}/tests/fixtures/igmp.pcapng)
+        ${IGMPSHARK_ROOT}/tests/fixtures/igmp.pcap
+        ${IGMPSHARK_ROOT}/tests/fixtures/igmp.pcapng)
 endif()

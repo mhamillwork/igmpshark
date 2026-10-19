@@ -41,7 +41,7 @@ Unit tests do not need Wireshark:
 
 ```sh
 ./scripts/test.sh
-cmake -S . -B build -DIGMPSHARK_WITH_WIRESHARK=OFF && cmake --build build && ctest --test-dir build --output-on-failure
+cmake -S src -B build -DIGMPSHARK_WITH_WIRESHARK=OFF && cmake --build build && ctest --test-dir build --output-on-failure
 ```
 
 With Wireshark configured, `ctest` also runs `test_ws` against the fixtures.
@@ -80,18 +80,15 @@ python3 tests/sim/run_local.py ./build/run/igmpshark
 Compose runs that same script inside the image. The image is UBI 9. Its build installs `flex`, `c-ares`, and `c-ares-devel` with dnf, then compiles the vendored Wireshark 4.6.9, and is slow:
 
 ```sh
-docker build -t igmpshark:local .
+docker build -f dockerfile/Dockerfile.igmp-shark -t igmpshark:local .
 docker compose -f tests/sim/compose.yaml run --rm sim
 ```
 
 ## Install
 
 ```sh
-helm install igmpshark chart/igmpshark \
-  --set image.repository=igmpshark \
-  --set image.tag=local \
-  --set cilium.image=quay.io/cilium/cilium:v1.19.3 \
-  --set config.dryRun=true
+helm install igmpshark helm-chart/igmpshark \
+  -f helm-deploy/igmp-shark-values.yaml
 ```
 
 Set `config.dryRun=false` only after `/metrics` shows the groups you expect. Dry-run still captures and plans; it does not call `cilium-dbg`.
@@ -108,8 +105,10 @@ Three different things are easy to mix up. A pod's membership is protocol state 
 
 ## Layout
 
-- `src/` protocol engine, capture, Cilium file/CLI backends, Kubernetes watch
-- `chart/igmpshark` DaemonSet, ServiceAccount, RBAC
+- `src/` protocol engine, capture, Cilium file/CLI backends, Kubernetes watch, `CMakeLists.txt`
+- `helm-chart/igmpshark` DaemonSet, ServiceAccount, RBAC
+- `helm-deploy/igmp-shark-values.yaml` Helm overrides
+- `dockerfile/` `Dockerfile.igmp-shark` and `Dockerfile.build-libwireshark`
 - `docs/` architecture, Cilium notes, operations
 - `scripts/` Wireshark 4.6.9 build and dependency lists
 - `third_party/wireshark-4.6.9.tar.xz` Wireshark 4.6.9 source used by that build

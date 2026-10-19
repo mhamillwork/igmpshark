@@ -9,7 +9,7 @@
 # is only required for the GUI and sharkd, which this build turns off.
 # GnuTLS and MaxMindDB are optional and stay disabled.
 #
-#   docker build -f Dockerfile.build-libwireshark -t igmpshark-libwireshark:ubi9 .
+#   docker build -f dockerfile/Dockerfile.build-libwireshark -t igmpshark-libwireshark:ubi9 .
 #
 # Libraries land in /opt/wireshark-4.6.9/build/run/.
 

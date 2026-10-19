@@ -1,9 +1,9 @@
-# Overrides for chart/igmpshark. Keys omitted here keep chart/igmpshark/values.yaml.
+# Overrides for helm-chart/igmpshark. Keys omitted here keep helm-chart/igmpshark/values.yaml.
 #
-#   helm upgrade --install igmpshark chart/igmpshark -f igmp-shark-values.yaml
+#   helm upgrade --install igmpshark helm-chart/igmpshark -f helm-deploy/igmp-shark-values.yaml
 
 image:
-  # Image from `docker build -t igmpshark:local .`.
+  # Image from `docker build -f dockerfile/Dockerfile.igmp-shark -t igmpshark:local .`.
   # On the cluster, set repository and tag to the copy loaded on every node.
   repository: igmpshark
   tag: local
