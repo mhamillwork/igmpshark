@@ -115,4 +115,4 @@ Three different things are easy to mix up. A pod's membership is protocol state 
 - `third_party/wireshark-4.6.9.tar.xz` Wireshark 4.6.9 source used by that build
 - `tests/` unit tests, fixtures, multi-process simulation, cluster script
 
-The attached `sqlshark-cursor-jsonb-promotion-races-94e7.zip` is the dbshark reference and is not part of the build. License notices for the adapted files are in `LICENSE`.
+License notices for files adapted from dbshark are in `LICENSE`.

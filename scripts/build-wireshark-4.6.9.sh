@@ -1,8 +1,7 @@
 #!/bin/sh
 # Build libwireshark, libwiretap, and libwsutil from the Wireshark 4.6.9
-# source tarball shipped in this repository. Adapted from the dbshark
-# reference (sqlshark-cursor-jsonb-promotion-races-94e7
-# tests/dbshark/build/build-wireshark-4.2.6.sh). The source is not downloaded.
+# source tarball shipped in this repository. Adapted from dbshark
+# tests/dbshark/build/build-wireshark-4.2.6.sh. The source is not downloaded.
 # Installs no system Wireshark packages.
 #
 # Usage:

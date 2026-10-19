@@ -1,5 +1,5 @@
-/* Capture/dissection lifecycle adapted from the attached dbshark reference
- * (src/dbshark.c): wtap_init, epan_init, epan_load_settings, epan_new,
+/* Capture/dissection lifecycle adapted from dbshark (src/dbshark.c):
+ * wtap_init, epan_init, epan_load_settings, epan_new,
  * epan_dissect_run with tvb_new_real_data, then epan_dissect_free,
  * epan_free, epan_cleanup, wtap_cleanup. PostgreSQL and reassembly-hold
  * behavior from that program is intentionally not included.

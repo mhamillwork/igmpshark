@@ -1,6 +1,6 @@
 #!/bin/sh
-# Debian/Ubuntu packages for igmpshark. Adapted from the dbshark deps-debian.sh
-# in the attached sqlshark zip. PostgreSQL is not required.
+# Debian/Ubuntu packages for igmpshark. Adapted from dbshark's deps-debian.sh.
+# PostgreSQL is not required.
 set -eu
 MODE=${1:-all}
 export DEBIAN_FRONTEND=noninteractive
