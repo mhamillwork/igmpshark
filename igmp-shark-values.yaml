@@ -1,0 +1,21 @@
+# Overrides for chart/igmpshark. Keys omitted here keep chart/igmpshark/values.yaml.
+#
+#   helm upgrade --install igmpshark chart/igmpshark -f igmp-shark-values.yaml
+
+image:
+  # Image from `docker build -t igmpshark:local .`.
+  # On the cluster, set repository and tag to the copy loaded on every node.
+  repository: igmpshark
+  tag: local
+  pullPolicy: IfNotPresent
+
+cilium:
+  # Same Cilium release as the cluster: v1.19.2 or v1.19.3.
+  # The chart copies cilium-dbg out of this image. If the cluster pulls from
+  # an isolated registry, use that registry's copy of the same image.
+  image: quay.io/cilium/cilium:v1.19.3
+
+config:
+  # Plans group and subscriber changes and does not call cilium-dbg.
+  # Set false after /metrics shows the groups you expect.
+  dryRun: true
