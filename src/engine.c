@@ -364,6 +364,8 @@ int igmp_engine_on_message(igmp_engine *e, const igmp_message *msg,
     if (msg->kind == IGMP_KIND_V3_REPORT) {
         for (int i = 0; i < msg->n_records; i++)
             apply_v3_record(e, &msg->records[i], msg->src, ifindex, ifgen, now_ms);
+        if (msg->too_many_records)
+            e->limit_drops++;
         return 0;
     }
     if (!igmp_group_routable(msg->group)) {

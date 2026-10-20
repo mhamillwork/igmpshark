@@ -38,7 +38,7 @@ Passive mode (the default) never expires a member only because unsolicited repor
 
 ## Queues and limits
 
-The capture queue defaults to 64 frames. Overflow increments `igmpshark_queue_drops_total` and `igmpshark_capture_drops_total`. pcap's own drop counter is copied into the capture-drop metric when the kernel reports it. Memberships are capped by `--max-members` (default 1024, hard cap 4096). Source lists are capped at 16 addresses per member. The Kubernetes event queue holds 256 events; overflow is counted and the watch does another full list rather than deleting from a partial view.
+The capture queue defaults to 64 frames. The capture loop drains it before that fills, so a shutdown burst is applied instead of dropped. Overflow still increments `igmpshark_queue_drops_total` and `igmpshark_capture_drops_total`. An IGMPv3 report keeps every group record that fits in the captured frame. pcap's own drop counter is copied into the capture-drop metric when the kernel reports it. Memberships are capped by `--max-members` (default 1024, hard cap 4096). Source lists are capped at 16 addresses per member. The Kubernetes event queue holds 256 events; overflow is counted and the watch does another full list rather than deleting from a partial view.
 
 `cilium-dbg` is executed with `execvp` and a 3 second deadline. Packet bytes are never interpolated into a shell. A failed list is an error, not an empty map, so a missing binary cannot wipe memberships.
 

@@ -5,7 +5,9 @@
 #include <stdint.h>
 
 #define IGMP_MAX_SOURCES 16
-#define IGMP_MAX_RECORDS 32
+/* One IGMPv3 report can list every group that fits in a captured frame.
+ * 32 dropped the tail of a shutdown report, so those memberships stayed. */
+#define IGMP_MAX_RECORDS 256
 #define IGMP_UID_LEN 96
 #define IGMP_NODE_LEN 64
 

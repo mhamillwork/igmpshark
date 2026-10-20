@@ -448,6 +448,37 @@ static void test_limits_and_sll(void) {
     expect(igmp_parse_ipv4(sll, 16 + total, IGMP_LINK_SLL, &msg) == 0, "sll parse");
 }
 
+static void test_bulk_leave_without_querier(void) {
+    setup(0);
+    enum { N = 40 };
+    igmp_record recs[N];
+    uint8_t big[1024];
+    memset(recs, 0, sizeof recs);
+    uint32_t base = ip4("239.20.0.1");
+    uint32_t src = ip4("10.20.0.8");
+    for (int i = 0; i < N; i++) {
+        recs[i].type = IGMP_REC_TO_EXCLUDE;
+        recs[i].group = base + (uint32_t)i;
+    }
+    size_t n = v3_report(big, src, recs, N);
+    igmp_message msg;
+    expect(igmp_parse_ipv4(big, n, IGMP_LINK_ETHERNET, &msg) == 0 && msg.n_records == N &&
+               !msg.too_many_records,
+           "one report keeps every group record");
+    igmp_engine_on_frame(&E, big, n, IGMP_LINK_ETHERNET, 1, 1, 0);
+    expect(igmp_engine_joined_count(&E) == N, "bulk join");
+    for (int i = 0; i < N; i++) {
+        recs[i].type = IGMP_REC_TO_INCLUDE;
+        recs[i].n_sources = 0;
+    }
+    n = v3_report(big, src, recs, N);
+    igmp_engine_on_frame(&E, big, n, IGMP_LINK_ETHERNET, 1, 1, 50);
+    expect(igmp_engine_joined_count(&E) == N, "leaves are armed, not dropped");
+    igmp_engine_tick(&E, 150);
+    igmp_engine_tick(&E, 250);
+    expect(igmp_engine_joined_count(&E) == 0, "every leave finishes without a querier");
+}
+
 int main(void) {
     test_parse_and_join();
     test_v1_and_leave();
@@ -455,6 +486,7 @@ int main(void) {
     test_shared_suppression();
     test_no_expire_without_querier();
     test_v3_records();
+    test_bulk_leave_without_querier();
     test_malformed_and_dedup();
     test_identity_cleanup();
     test_querier_election();

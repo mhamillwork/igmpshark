@@ -818,6 +818,11 @@ int main(int argc, char **argv) {
                 uint32_t n = hdr->caplen > IGMP_FRAME_MAX ? IGMP_FRAME_MAX : hdr->caplen;
                 unsigned idx = if_nametoindex(caps[i].name);
                 handle_frame(data, n, caps[i].dlt, idx);
+                /* A shutdown sends one report per group back to back. Draining
+                 * only after the burst filled the 64-slot queue dropped the
+                 * rest, and those memberships never left. */
+                if (rt->queue_depth > rt->queue_cap / 2)
+                    igmp_runtime_drain(rt, rt->queue_cap);
             }
             struct pcap_stat st;
             if (pcap_stats(caps[i].pcap, &st) == 0)
