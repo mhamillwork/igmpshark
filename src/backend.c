@@ -4,6 +4,7 @@
 #include "backend.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -117,10 +118,48 @@ static int64_t mono_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+static void flatten_output(char *out, size_t *used) {
+    size_t w = 0;
+    for (size_t i = 0; i < *used; i++) {
+        unsigned char c = (unsigned char)out[i];
+        if (c == '\n' || c == '\r' || c == '\t' || c == '"')
+            c = ' ';
+        if (c < 0x20)
+            continue;
+        if (c == ' ' && (w == 0 || out[w - 1] == ' '))
+            continue;
+        out[w++] = (char)c;
+    }
+    while (w > 0 && out[w - 1] == ' ')
+        w--;
+    out[w] = 0;
+    *used = w;
+}
+
+static void note_status(char *out, size_t outlen, size_t used, int status, int timed_out) {
+    flatten_output(out, &used);
+    if (used + 1 >= outlen)
+        return;
+    if (timed_out)
+        snprintf(out + used, outlen - used, "%stimed out", used ? " | " : "");
+    else if (WIFSIGNALED(status))
+        snprintf(out + used, outlen - used, "%ssignal %d", used ? " | " : "", WTERMSIG(status));
+    else if (WIFEXITED(status))
+        snprintf(out + used, outlen - used, "%sexit %d", used ? " | " : "", WEXITSTATUS(status));
+    else
+        snprintf(out + used, outlen - used, "%sstatus %d", used ? " | " : "", status);
+}
+
 static int run_argv(char *const argv[], char *out, size_t outlen, int timeout_ms) {
     int pipefd[2];
+    if (outlen == 0)
+        return -1;
+    out[0] = 0;
     if (pipe(pipefd) != 0)
         return -1;
+    int flags = fcntl(pipefd[0], F_GETFL, 0);
+    if (flags >= 0)
+        fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
     pid_t pid = fork();
     if (pid < 0) {
         close(pipefd[0]);
@@ -133,6 +172,7 @@ static int run_argv(char *const argv[], char *out, size_t outlen, int timeout_ms
         close(pipefd[0]);
         close(pipefd[1]);
         execvp(argv[0], argv);
+        fprintf(stderr, "exec %s: %s", argv[0] ? argv[0] : "", strerror(errno));
         _exit(127);
     }
     close(pipefd[1]);
@@ -140,48 +180,50 @@ static int run_argv(char *const argv[], char *out, size_t outlen, int timeout_ms
     int64_t deadline = mono_ms() + (timeout_ms > 0 ? timeout_ms : 3000);
     int status = 0;
     int done = 0;
+    int timed_out = 0;
     while (!done) {
         int left = (int)(deadline - mono_ms());
         if (left < 0)
             left = 0;
         struct pollfd pfd = {.fd = pipefd[0], .events = POLLIN};
-        int pr = poll(&pfd, 1, left);
+        int pr = poll(&pfd, 1, left > 200 ? 200 : left);
         if (pr > 0 && (pfd.revents & (POLLIN | POLLHUP))) {
             if (used + 1 < outlen) {
                 ssize_t r = read(pipefd[0], out + used, outlen - 1 - used);
                 if (r > 0)
                     used += (size_t)r;
-                else
-                    done = 1;
             } else {
                 char junk[256];
-                if (read(pipefd[0], junk, sizeof junk) <= 0)
+                if (read(pipefd[0], junk, sizeof junk) < 0 && errno != EAGAIN)
                     done = 1;
             }
         }
         pid_t w = waitpid(pid, &status, WNOHANG);
-        if (w == pid)
+        if (w == pid) {
+            for (;;) {
+                if (used + 1 >= outlen)
+                    break;
+                ssize_t r = read(pipefd[0], out + used, outlen - 1 - used);
+                if (r > 0)
+                    used += (size_t)r;
+                else
+                    break;
+            }
             done = 1;
-        if (mono_ms() >= deadline && !done) {
-            kill(pid, SIGKILL);
-            waitpid(pid, &status, 0);
-            close(pipefd[0]);
-            out[used] = 0;
-            return -1;
         }
-        if (pr == 0 && w == 0 && mono_ms() >= deadline) {
+        if (!done && mono_ms() >= deadline) {
             kill(pid, SIGKILL);
             waitpid(pid, &status, 0);
-            close(pipefd[0]);
-            out[used] = 0;
-            return -1;
+            timed_out = 1;
+            done = 1;
         }
     }
     out[used] = 0;
     close(pipefd[0]);
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
-        return -1;
-    return 0;
+    if (!timed_out && WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return 0;
+    note_status(out, outlen, used, status, timed_out);
+    return -1;
 }
 
 typedef struct cli_ctx {

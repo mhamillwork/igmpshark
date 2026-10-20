@@ -67,9 +67,9 @@ static void http_cache_refresh(void) {
         return;
     char metrics[sizeof hcache.metrics];
     igmp_metrics_render(rt, metrics, sizeof metrics);
+    /* Capture up means the process can do its job. A Kubernetes watch
+     * blip is igmpshark_k8s_watch_healthy, not a reason to fail the probe. */
     int ready = no_capture || ncaps > 0;
-    if (rt->use_kube && !rt->pods.api_healthy && rt->pods.full_list_ok)
-        ready = 0;
     const char *body = rt->eng->querier_degraded ? "degraded\n" : "ready\n";
     pthread_mutex_lock(&hcache.mu);
     hcache.ready_code = ready ? 200 : 503;
@@ -629,7 +629,7 @@ int main(int argc, char **argv) {
     if (!be)
         return 1;
     if (strcmp(backend_kind, "cilium") == 0) {
-        if (backend_cli_open(be, cilium, ledger, dry, 3000) != 0)
+        if (backend_cli_open(be, cilium, ledger, dry, 10000) != 0)
             return 1;
     } else {
         if (backend_file_open(be, state_path, dry) != 0)

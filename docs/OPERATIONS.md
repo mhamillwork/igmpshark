@@ -65,7 +65,7 @@ If the group is created in Cilium but the pod still receives nothing, the datapa
 
 ## Capabilities and mounts
 
-The DaemonSet runs as root so it can open raw sockets. It drops all capabilities and adds `NET_RAW` and `NET_ADMIN`. It mounts the Cilium agent socket directory and bpffs read-only. It does not mount the host root or a kubeconfig. The service account can get, list, and watch pods and nodes, and can create and update ConfigMaps used as snapshots. It cannot delete pods or ConfigMaps.
+The DaemonSet runs as root and privileged so it can open raw sockets, enter the Cilium agent's namespaces, and call `bpf()` on the multicast maps. A service account cannot update those maps. The service account can get, list, and watch pods and nodes, and can create and update ConfigMaps used as snapshots. It cannot delete pods or ConfigMaps. The pod mounts the Cilium agent socket directory and bpffs read-only. It does not mount the host root or a kubeconfig.
 
 ## RHEL
 

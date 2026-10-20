@@ -46,14 +46,15 @@ rbac:
 
 podSecurityContext: {}
 
+# Privileged because cilium-dbg opens the agent's BPF maps with the bpf()
+# syscall and nsenter's the agent's namespaces. The service account cannot
+# grant that. It is only used to list pods and to publish snapshot ConfigMaps.
 securityContext:
   runAsUser: 0
   runAsNonRoot: false
-  allowPrivilegeEscalation: false
+  privileged: true
+  allowPrivilegeEscalation: true
   readOnlyRootFilesystem: false
-  capabilities:
-    drop: ["ALL"]
-    add: ["NET_RAW", "NET_ADMIN", "SYS_ADMIN"]
 
 # hostNetwork is required to capture pod veth / cilium interfaces in the host
 # network namespace. It does not by itself make IGMP visible: set
@@ -61,8 +62,8 @@ securityContext:
 # (often "any", which is Linux cooked capture, or specific lxc*/cilium_host
 # devices). Confirm with a short tcpdump before expecting joins.
 hostNetwork: true
-# cilium-dbg bpf commands must run in the Cilium agent's mount namespace.
-# hostPID plus SYS_ADMIN lets the wrapper nsenter that process.
+# cilium-dbg bpf commands must run in the Cilium agent's mount and network
+# namespaces. hostPID lets the wrapper find the agent process and nsenter it.
 hostPID: true
 dnsPolicy: ClusterFirstWithHostNet
 
