@@ -62,8 +62,8 @@ securityContext:
 # (often "any", which is Linux cooked capture, or specific lxc*/cilium_host
 # devices). Confirm with a short tcpdump before expecting joins.
 hostNetwork: true
-# cilium-dbg bpf commands must run in the Cilium agent's mount, network, and
-# PID namespaces. hostPID lets the wrapper find the agent process and nsenter it.
+# cilium-dbg reads /proc/self/mountinfo to find the agent's bpffs. hostPID
+# lets the helper find cilium-agent and join its namespaces.
 hostPID: true
 dnsPolicy: ClusterFirstWithHostNet
 

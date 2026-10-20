@@ -30,7 +30,8 @@ RUN chmod +x scripts/build-wireshark-4.6.9.sh \
     && cp -a /opt/wireshark-4.6.9/build/run/libwireshark.so* /opt/igmpshark/lib/ \
     && cp -a /opt/wireshark-4.6.9/build/run/libwiretap.so* /opt/igmpshark/lib/ \
     && cp -a /opt/wireshark-4.6.9/build/run/libwsutil.so* /opt/igmpshark/lib/ \
-    && cp -a /usr/lib64/libcares.so.2* /opt/igmpshark/lib/
+    && cp -a /usr/lib64/libcares.so.2* /opt/igmpshark/lib/ \
+    && gcc -O2 -Wall -Wextra -o /opt/igmpshark/cilium-dbg-in-agent scripts/cilium-dbg-in-agent.c
 
 FROM registry.access.redhat.com/ubi9/ubi:9.8
 # libcurl-minimal is already installed and provides libcurl.so.4. The libcurl
@@ -42,7 +43,7 @@ RUN dnf -y install \
     && dnf clean all
 COPY --from=build /opt/igmpshark/igmpshark /usr/local/bin/igmpshark
 COPY --from=build /opt/igmpshark/lib/ /usr/local/lib/igmpshark/
-COPY scripts/cilium-dbg-in-agent.sh /usr/local/bin/cilium-dbg-in-agent
+COPY --from=build /opt/igmpshark/cilium-dbg-in-agent /usr/local/bin/cilium-dbg-in-agent
 RUN chmod 755 /usr/local/bin/cilium-dbg-in-agent
 ENV LD_LIBRARY_PATH=/usr/local/lib/igmpshark
 USER 65532:65532
