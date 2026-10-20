@@ -15,6 +15,7 @@ spec:
     spec:
       serviceAccountName: {{ include "igmpshark.serviceAccountName" . }}
       hostNetwork: {{ .Values.hostNetwork }}
+      hostPID: {{ .Values.hostPID }}
       dnsPolicy: {{ .Values.dnsPolicy }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
@@ -114,10 +115,8 @@ spec:
             {{- if .Values.config.kubeCoord }}
             - --kube-coord
             {{- end }}
-            {{- if .Values.cilium.image }}
             - --cilium-dbg
-            - /opt/cilium/cilium-dbg
-            {{- end }}
+            - /usr/local/bin/cilium-dbg-in-agent
           ports:
             - name: http
               containerPort: {{ .Values.probes.port }}

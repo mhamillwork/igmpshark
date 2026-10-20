@@ -27,7 +27,7 @@ cilium-dbg bpf multicast group list
 
 Arguments are a fixed argv. The list parser accepts `Group Subscriber Type` rows. Cilium 1.19 labels a node entry `Remote Node` and a pod entry `Local`. A group address on its own is a group marker. Managed versus unmanaged is decided by the on-disk ledger plus the engine, not by a flag Cilium does not have.
 
-`cilium multicast add` programs every node from one CLI. igmpshark does not use it. Each DaemonSet pod programs only the agent on its own node through `/var/run/cilium/cilium.sock`, and learns other nodes' subscribers from the coord snapshots.
+`cilium multicast add` programs every node from one CLI. igmpshark does not use it. Each DaemonSet pod programs only the agent on its own node. `cilium-dbg bpf multicast` opens the pinned maps in the Cilium agent's mount namespace (`scripts/cilium-dbg-in-agent.sh`), because the host `/sys/fs/bpf` is often a different filesystem from the one the agent lists. Other nodes' subscribers still come from the coord snapshots.
 
 ## What Cilium already does
 

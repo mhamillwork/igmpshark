@@ -53,7 +53,7 @@ securityContext:
   readOnlyRootFilesystem: false
   capabilities:
     drop: ["ALL"]
-    add: ["NET_RAW", "NET_ADMIN"]
+    add: ["NET_RAW", "NET_ADMIN", "SYS_ADMIN"]
 
 # hostNetwork is required to capture pod veth / cilium interfaces in the host
 # network namespace. It does not by itself make IGMP visible: set
@@ -61,6 +61,9 @@ securityContext:
 # (often "any", which is Linux cooked capture, or specific lxc*/cilium_host
 # devices). Confirm with a short tcpdump before expecting joins.
 hostNetwork: true
+# cilium-dbg bpf commands must run in the Cilium agent's mount namespace.
+# hostPID plus SYS_ADMIN lets the wrapper nsenter that process.
+hostPID: true
 dnsPolicy: ClusterFirstWithHostNet
 
 nodeSelector: {}

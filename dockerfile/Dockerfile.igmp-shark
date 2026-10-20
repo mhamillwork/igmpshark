@@ -38,9 +38,12 @@ FROM registry.access.redhat.com/ubi9/ubi:9.8
 RUN dnf -y install \
         glib2 libgcrypt libgpg-error libpcap pcre pcre2 zlib libxml2 libicu lz4-libs libzstd \
         libnghttp2 brotli krb5-libs libssh libstdc++ xz-libs ca-certificates \
+        util-linux \
     && dnf clean all
 COPY --from=build /opt/igmpshark/igmpshark /usr/local/bin/igmpshark
 COPY --from=build /opt/igmpshark/lib/ /usr/local/lib/igmpshark/
+COPY scripts/cilium-dbg-in-agent.sh /usr/local/bin/cilium-dbg-in-agent
+RUN chmod 755 /usr/local/bin/cilium-dbg-in-agent
 ENV LD_LIBRARY_PATH=/usr/local/lib/igmpshark
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/igmpshark"]
