@@ -261,6 +261,45 @@ static int fake_apply(igmp_backend *b, const igmp_op *op) {
     return 0;
 }
 
+static void test_apply_budget(void) {
+    char *dir = tmpdir();
+    igmp_runtime *rt = make_rt(dir, "n1", "10.244.0.1", 0);
+    uint8_t frame[128];
+    for (int i = 1; i <= 12; i++) {
+        char gbuf[32];
+        snprintf(gbuf, sizeof gbuf, "239.8.0.%d", i);
+        rt->now_ms = (int64_t)i * 1000;
+        size_t n = v2_report(frame, ip4("10.8.0.1"), ip4(gbuf));
+        igmp_runtime_on_frame(rt, frame, n, IGMP_LINK_ETHERNET, 1, 1);
+    }
+    expect(igmp_engine_joined_count(rt->eng) == 12, "twelve groups joined");
+    fake_be *f = calloc(1, sizeof *f);
+    igmp_backend *b = calloc(1, sizeof *b);
+    b->load = fake_load;
+    b->apply = fake_apply;
+    b->user = f;
+    rt->backend = b;
+    int first = igmp_runtime_reconcile(rt);
+    expect(first == 8, "first pass stops at the apply budget");
+    expect(rt->mutations == 8, "eight mutations recorded");
+    expect(rt->reconcile_failures == 0, "a full queue is not a failure");
+    expect(rt->reconcile_ok == 0, "the plan is not finished");
+    int second = igmp_runtime_reconcile(rt);
+    expect(second == 4, "remainder is applied next");
+    expect(rt->mutations == 12, "every group was applied");
+    expect(rt->reconcile_retries == 1, "continuation counts as a retry");
+    expect(rt->reconcile_failures == 0, "continuation is not a failure");
+    expect(rt->reconcile_ok == 1, "plan finished");
+    expect(f->n == 12, "backend holds every group");
+    int third = igmp_runtime_reconcile(rt);
+    expect(third == 0, "steady state plans nothing");
+    expect(rt->mutations == 12, "steady state adds no mutations");
+    igmp_runtime_free(rt);
+    free(f);
+    free(b);
+    free(dir);
+}
+
 static void test_retry_and_stale(void) {
     char *dir = tmpdir();
     igmp_runtime *rt = make_rt(dir, "n1", "10.244.0.1", 0);
@@ -492,6 +531,7 @@ int main(void) {
     test_dry_and_idempotent();
     test_pod_lifecycle();
     test_api_and_iface();
+    test_apply_budget();
     test_retry_and_stale();
     test_grace_unmanaged_restart_restore();
     test_refcount_and_querier();

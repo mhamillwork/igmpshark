@@ -72,12 +72,13 @@ static int read_file(const char *path, char *out, size_t cap) {
     return 0;
 }
 
-static int kube_setup_easy(kube_client *k, CURL *c, const char *url, buf *body) {
+static int kube_setup_easy(kube_client *k, CURL *c, const char *url, buf *body, long timeout_s) {
     curl_easy_setopt(c, CURLOPT_URL, url);
     curl_easy_setopt(c, CURLOPT_CAINFO, k->ca);
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, buf_write);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, body);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT, 40L);
+    curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, timeout_s > 0 ? timeout_s : 40L);
     struct curl_slist *hdr = NULL;
     char auth[8400];
     snprintf(auth, sizeof auth, "Authorization: Bearer %s", k->token);
@@ -215,14 +216,14 @@ static void scan_watch_line(kube_client *k, const char *line) {
         push_ev(k, &ev);
 }
 
-static int http_get(kube_client *k, const char *url, long *code, buf *body) {
+static int http_get(kube_client *k, const char *url, long *code, buf *body, long timeout_s) {
     CURL *c = curl_easy_init();
     if (!c)
         return -1;
     body->data = NULL;
     body->len = 0;
     body->cap = 0;
-    kube_setup_easy(k, c, url, body);
+    kube_setup_easy(k, c, url, body, timeout_s);
     CURLcode rc = curl_easy_perform(c);
     if (rc == CURLE_OK)
         curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, code);
@@ -246,7 +247,7 @@ static void *kube_thread(void *arg) {
                  k->port, rv);
         buf body;
         long code = 0;
-        if (http_get(k, url, &code, &body) != 0 || code != 200) {
+        if (http_get(k, url, &code, &body, 40) != 0 || code != 200) {
             push_kind(k, KUBE_EV_API_DOWN);
             free(body.data);
             for (int i = 0; i < 20 && !k->stop; i++)
@@ -276,7 +277,7 @@ static void *kube_thread(void *arg) {
             continue;
         buf watch;
         memset(&watch, 0, sizeof watch);
-        kube_setup_easy(k, c, url, &watch);
+        kube_setup_easy(k, c, url, &watch, 40);
         curl_easy_perform(c);
         long wcode = 0;
         curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &wcode);
@@ -397,7 +398,7 @@ int kube_publish_snapshot(const char *node, const char *text) {
     buf body;
     memset(&body, 0, sizeof body);
     CURL *c = curl_easy_init();
-    kube_setup_easy(k, c, url, &body);
+    kube_setup_easy(k, c, url, &body, 3);
     curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, "PUT");
     curl_easy_setopt(c, CURLOPT_POSTFIELDS, payload);
     struct curl_slist *hdr = NULL;
@@ -418,7 +419,7 @@ int kube_publish_snapshot(const char *node, const char *text) {
                      k->ns);
             c = curl_easy_init();
             memset(&body, 0, sizeof body);
-            kube_setup_easy(k, c, url, &body);
+            kube_setup_easy(k, c, url, &body, 3);
             curl_easy_setopt(c, CURLOPT_POST, 1L);
             curl_easy_setopt(c, CURLOPT_POSTFIELDS, payload);
             curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdr);
@@ -442,7 +443,7 @@ int kube_fetch_snapshots(const char *dir) {
              k->host, k->port, k->ns);
     buf body;
     long code = 0;
-    if (http_get(k, url, &code, &body) != 0 || code != 200) {
+    if (http_get(k, url, &code, &body, 3) != 0 || code != 200) {
         free(body.data);
         return -1;
     }

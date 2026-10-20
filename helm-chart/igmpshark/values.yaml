@@ -82,6 +82,6 @@ probes:
   port: 9080
 
 volumes:
-  # BPF filesystem is mounted read-only for diagnosis. Mutations go through
-  # the agent socket, not by writing maps from this container.
+  # BPF filesystem is mounted read-only. cilium-dbg runs inside the Cilium
+  # agent's mount namespace, which is where the multicast maps are pinned.
   bpffs: /sys/fs/bpf

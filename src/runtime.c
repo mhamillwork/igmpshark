@@ -44,6 +44,34 @@ static void logj(const igmp_runtime *rt, const char *level, const char *msg) {
             rt->node_name);
 }
 
+/* Each cilium-dbg call can take the full command timeout. A full pass over
+ * every membership blocks the capture loop long enough for kubelet to time
+ * out /healthz. Finish the rest on the next reconcile. */
+enum { IGMP_APPLY_PER_PASS = 8 };
+
+static void log_backend(const igmp_runtime *rt, const char *msg) {
+    if (!rt->log_json)
+        return;
+    char detail[180];
+    const char *src = (rt->backend && rt->backend->err[0]) ? rt->backend->err : "";
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j + 2 < sizeof detail; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '"' || c == '\\') {
+            detail[j++] = '\\';
+            detail[j++] = (char)c;
+        } else if (c < 0x20) {
+            detail[j++] = ' ';
+        } else {
+            detail[j++] = (char)c;
+        }
+    }
+    detail[j] = 0;
+    fprintf(stderr,
+            "{\"level\":\"warn\",\"msg\":\"%s\",\"detail\":\"%s\",\"node\":\"%s\"}\n", msg, detail,
+            rt->node_name);
+}
+
 igmp_runtime *igmp_runtime_new(const igmp_config *cfg, int64_t now_ms) {
     igmp_runtime *rt = calloc(1, sizeof(igmp_runtime) + sizeof(igmp_rt_extra));
     if (!rt)
@@ -397,17 +425,21 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
         free(ops);
         return -1;
     }
-    int nactual = rt->backend->load(rt->backend, actual, 4096);
-    if (nactual < 0) {
-        rt->reconcile_failures++;
-        logj(rt, "warn", "backend-load-failed");
-        free(actual);
-        free(local);
-        free(remote);
-        free(ops);
-        return -1;
+    int continue_plan = x->n_retry > 0 && x->retry_gen == rt->gen;
+    int nactual = 0;
+    if (!continue_plan) {
+        nactual = rt->backend->load(rt->backend, actual, 4096);
+        if (nactual < 0) {
+            rt->reconcile_failures++;
+            log_backend(rt, "backend-load-failed");
+            free(actual);
+            free(local);
+            free(remote);
+            free(ops);
+            return -1;
+        }
+        apply_ledger_marks(rt, actual, nactual);
     }
-    apply_ledger_marks(rt, actual, nactual);
     int nlocal = fill_local(rt, local, 4096);
     int nremote = 0;
     uint32_t stale[128];
@@ -429,7 +461,7 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
         allow_delete = 0;
     int nop = 0;
     int from_retry = 0;
-    if (x->n_retry > 0 && x->retry_gen == rt->gen) {
+    if (continue_plan) {
         nop = x->n_retry;
         memcpy(ops, x->retry, (size_t)nop * sizeof *ops);
         from_retry = 1;
@@ -462,7 +494,28 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
         free(ops);
         return nop;
     }
+    int applied = 0;
     for (int i = 0; i < nop; i++) {
+        if (applied >= IGMP_APPLY_PER_PASS) {
+            int left = nop - i;
+            if (left > x->retry_cap)
+                left = x->retry_cap;
+            memcpy(x->retry, &ops[i], (size_t)left * sizeof(igmp_op));
+            x->n_retry = left;
+            x->retry_gen = rt->gen;
+            if (rt->log_json) {
+                fprintf(stderr,
+                        "{\"level\":\"info\",\"msg\":\"reconcile-deferred\",\"remaining\":%d,"
+                        "\"node\":\"%s\"}\n",
+                        left, rt->node_name);
+            }
+            free(actual);
+            free(local);
+            free(remote);
+            free(ops);
+            (void)from_retry;
+            return applied;
+        }
         if (rt->backend->apply(rt->backend, &ops[i]) != 0) {
             int left = nop - i;
             if (left > x->retry_cap)
@@ -471,7 +524,7 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
             x->n_retry = left;
             x->retry_gen = rt->gen;
             rt->reconcile_failures++;
-            logj(rt, "warn", "backend-apply-failed");
+            log_backend(rt, "backend-apply-failed");
             free(actual);
             free(local);
             free(remote);
@@ -479,6 +532,7 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
             (void)from_retry;
             return -1;
         }
+        applied++;
         rt->mutations++;
         ledger_after_op(rt, &ops[i]);
     }

@@ -14,11 +14,13 @@
 #include <netinet/in.h>
 #include <pcap/pcap.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -48,6 +50,33 @@ static kube_client *kube;
 static int kube_coord;
 static char http_host[64] = "0.0.0.0";
 static int http_port = 9080;
+
+/* /healthz must answer while reconcile is inside curl or cilium-dbg.
+ * The HTTP thread only reads this cache; it never touches rt. */
+typedef struct {
+    pthread_mutex_t mu;
+    int ready_code;
+    char ready_body[32];
+    char metrics[8192];
+} http_cache;
+
+static http_cache hcache;
+
+static void http_cache_refresh(void) {
+    if (!rt)
+        return;
+    char metrics[sizeof hcache.metrics];
+    igmp_metrics_render(rt, metrics, sizeof metrics);
+    int ready = no_capture || ncaps > 0;
+    if (rt->use_kube && !rt->pods.api_healthy && rt->pods.full_list_ok)
+        ready = 0;
+    const char *body = rt->eng->querier_degraded ? "degraded\n" : "ready\n";
+    pthread_mutex_lock(&hcache.mu);
+    hcache.ready_code = ready ? 200 : 503;
+    snprintf(hcache.ready_body, sizeof hcache.ready_body, "%s", body);
+    snprintf(hcache.metrics, sizeof hcache.metrics, "%s", metrics);
+    pthread_mutex_unlock(&hcache.mu);
+}
 
 static int64_t mono_ms(void) {
     struct timespec ts;
@@ -206,28 +235,58 @@ static void http_reply(int fd, int code, const char *type, const char *body) {
 
 static void http_client(int fd) {
     char req[1024];
-    ssize_t n = recv(fd, req, sizeof req - 1, 0);
-    if (n <= 0) {
+    size_t got = 0;
+    while (got < sizeof req - 1) {
+        ssize_t n = recv(fd, req + got, sizeof req - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        req[got] = 0;
+        if (strstr(req, "\n") != NULL)
+            break;
+    }
+    if (got == 0) {
         close(fd);
         return;
     }
-    req[n] = 0;
-    char metrics[4096];
     if (strncmp(req, "GET /metrics", 12) == 0) {
-        igmp_metrics_render(rt, metrics, sizeof metrics);
+        char metrics[sizeof hcache.metrics];
+        pthread_mutex_lock(&hcache.mu);
+        snprintf(metrics, sizeof metrics, "%s", hcache.metrics);
+        pthread_mutex_unlock(&hcache.mu);
         http_reply(fd, 200, "text/plain; version=0.0.4", metrics);
     } else if (strncmp(req, "GET /healthz", 12) == 0) {
         http_reply(fd, 200, "text/plain", "ok\n");
     } else if (strncmp(req, "GET /readyz", 11) == 0) {
-        int ready = no_capture || ncaps > 0;
-        if (rt->use_kube && !rt->pods.api_healthy && rt->pods.full_list_ok)
-            ready = 0;
-        const char *body = rt->eng->querier_degraded ? "degraded\n" : "ready\n";
-        http_reply(fd, ready ? 200 : 503, "text/plain", body);
+        int code;
+        char body[32];
+        pthread_mutex_lock(&hcache.mu);
+        code = hcache.ready_code;
+        snprintf(body, sizeof body, "%s", hcache.ready_body);
+        pthread_mutex_unlock(&hcache.mu);
+        http_reply(fd, code, "text/plain", body);
     } else {
         http_reply(fd, 404, "text/plain", "not found\n");
     }
     close(fd);
+}
+
+static void *http_thread(void *arg) {
+    (void)arg;
+    for (;;) {
+        int c = accept(http_fd, NULL, NULL);
+        if (c < 0) {
+            if (errno == EINTR)
+                continue;
+            usleep(10000);
+            continue;
+        }
+        struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
+        setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+        http_client(c);
+    }
+    return NULL;
 }
 
 static int hex_nibble(int c) {
@@ -599,11 +658,21 @@ int main(int argc, char **argv) {
             ws_capture_shutdown();
         return 0;
     }
+    pthread_mutex_init(&hcache.mu, NULL);
+    hcache.ready_code = 200;
+    snprintf(hcache.ready_body, sizeof hcache.ready_body, "%s", "ready\n");
     http_fd = listen_tcp(http_host, http_port);
     if (http_fd < 0) {
         perror("listen");
         return 1;
     }
+    http_cache_refresh();
+    pthread_t http_thr;
+    if (pthread_create(&http_thr, NULL, http_thread, NULL) != 0) {
+        perror("http");
+        return 1;
+    }
+    pthread_detach(http_thr);
     if (control[0]) {
         char host[64];
         unsigned port = 0;
@@ -645,15 +714,10 @@ int main(int argc, char **argv) {
             }
             rt->queue_drops += kube_client_drops(kube);
         }
+        http_cache_refresh();
         struct pollfd pfds[16];
         int np = 0;
-        int http_slot = -1, ctrl_slot = -1, client_slot = -1;
-        if (http_fd >= 0) {
-            http_slot = np;
-            pfds[np].fd = http_fd;
-            pfds[np].events = POLLIN;
-            np++;
-        }
+        int ctrl_slot = -1, client_slot = -1;
         if (ctrl_fd >= 0 && ctrl_client < 0) {
             ctrl_slot = np;
             pfds[np].fd = ctrl_fd;
@@ -674,11 +738,6 @@ int main(int argc, char **argv) {
         }
         int pr = poll(pfds, (nfds_t)np, 200);
         (void)pr;
-        if (http_slot >= 0 && (pfds[http_slot].revents & POLLIN)) {
-            int c = accept(http_fd, NULL, NULL);
-            if (c >= 0)
-                http_client(c);
-        }
         if (ctrl_slot >= 0 && (pfds[ctrl_slot].revents & POLLIN)) {
             ctrl_client = accept(ctrl_fd, NULL, NULL);
             if (ctrl_client >= 0)
