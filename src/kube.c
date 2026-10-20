@@ -363,6 +363,12 @@ uint64_t kube_client_drops(const kube_client *k) {
     return k ? k->drops : 0;
 }
 
+static long g_http_status;
+
+long kube_last_status(void) {
+    return g_http_status;
+}
+
 static kube_client *oneshot(void) {
     static kube_client k;
     static int ready;
@@ -376,8 +382,44 @@ static kube_client *oneshot(void) {
     return &k;
 }
 
+static long kube_request(kube_client *k, const char *url, const char *method, const char *payload,
+                         const char *content_type, buf *out) {
+    CURL *c = curl_easy_init();
+    if (!c)
+        return 0;
+    memset(out, 0, sizeof *out);
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_CAINFO, k->ca);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, buf_write);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, out);
+    curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 3L);
+    struct curl_slist *hdr = NULL;
+    char auth[8400];
+    snprintf(auth, sizeof auth, "Authorization: Bearer %s", k->token);
+    hdr = curl_slist_append(hdr, auth);
+    hdr = curl_slist_append(hdr, "Accept: application/json");
+    if (content_type)
+        hdr = curl_slist_append(hdr, content_type);
+    curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdr);
+    if (method && strcmp(method, "POST") == 0)
+        curl_easy_setopt(c, CURLOPT_POST, 1L);
+    else if (method)
+        curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, method);
+    if (payload)
+        curl_easy_setopt(c, CURLOPT_POSTFIELDS, payload);
+    curl_easy_perform(c);
+    long code = 0;
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+    curl_easy_cleanup(c);
+    curl_slist_free_all(hdr);
+    g_http_status = code;
+    return code;
+}
+
 int kube_publish_snapshot(const char *node, const char *text) {
     kube_client *k = oneshot();
+    g_http_status = 0;
     if (!k || !node || !text)
         return -1;
     char b64[1 << 16];
@@ -385,51 +427,70 @@ int kube_publish_snapshot(const char *node, const char *text) {
         return -1;
     char name[160];
     snprintf(name, sizeof name, "igmpshark-%s", node);
-    char url[512];
-    snprintf(url, sizeof url, "https://%s:%s/api/v1/namespaces/%s/configmaps/%s", k->host, k->port,
+    char item[512], coll[512];
+    snprintf(item, sizeof item, "https://%s:%s/api/v1/namespaces/%s/configmaps/%s", k->host, k->port,
              k->ns, name);
-    char *payload = malloc(strlen(b64) + 512);
-    if (!payload)
+    snprintf(coll, sizeof coll, "https://%s:%s/api/v1/namespaces/%s/configmaps", k->host, k->port,
+             k->ns);
+    size_t cap = strlen(b64) + 640;
+    char *patch = malloc(cap);
+    char *create = malloc(cap);
+    if (!patch || !create) {
+        free(patch);
+        free(create);
         return -1;
-    snprintf(payload, strlen(b64) + 512,
+    }
+    snprintf(patch, cap,
+             "{\"metadata\":{\"labels\":{\"app.kubernetes.io/name\":\"igmpshark\"}},"
+             "\"data\":{\"snapshot\":\"%s\"}}",
+             b64);
+    snprintf(create, cap,
              "{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",\"metadata\":{\"name\":\"%s\","
              "\"labels\":{\"app.kubernetes.io/name\":\"igmpshark\"}},\"data\":{\"snapshot\":\"%s\"}}",
              name, b64);
     buf body;
-    memset(&body, 0, sizeof body);
-    CURL *c = curl_easy_init();
-    kube_setup_easy(k, c, url, &body, 3);
-    curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, "PUT");
-    curl_easy_setopt(c, CURLOPT_POSTFIELDS, payload);
-    struct curl_slist *hdr = NULL;
-    char auth[8400];
-    snprintf(auth, sizeof auth, "Authorization: Bearer %s", k->token);
-    hdr = curl_slist_append(hdr, auth);
-    hdr = curl_slist_append(hdr, "Content-Type: application/json");
-    curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdr);
-    curl_easy_perform(c);
-    long code = 0;
-    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
-    curl_easy_cleanup(c);
-    curl_slist_free_all(hdr);
+    long code = kube_request(k, item, "PATCH", patch, "Content-Type: application/merge-patch+json",
+                             &body);
     free(body.data);
-    if (code == 404 || code == 200 || code == 201) {
-        if (code == 404) {
-            snprintf(url, sizeof url, "https://%s:%s/api/v1/namespaces/%s/configmaps", k->host, k->port,
-                     k->ns);
-            c = curl_easy_init();
-            memset(&body, 0, sizeof body);
-            kube_setup_easy(k, c, url, &body, 3);
-            curl_easy_setopt(c, CURLOPT_POST, 1L);
-            curl_easy_setopt(c, CURLOPT_POSTFIELDS, payload);
-            curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdr);
-            curl_easy_perform(c);
-            curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
-            curl_easy_cleanup(c);
-            free(body.data);
+    if (code == 404) {
+        code = kube_request(k, coll, "POST", create, "Content-Type: application/json", &body);
+        free(body.data);
+    }
+    if (code == 200 || code == 201) {
+        free(patch);
+        free(create);
+        return 0;
+    }
+    /* PUT without resourceVersion is rejected once the ConfigMap exists, and
+     * the previous create reused a destroyed curl handle, so peers never saw
+     * a snapshot. Read the version and replace the object. */
+    code = kube_request(k, item, "GET", NULL, NULL, &body);
+    char rv[80] = "";
+    if (code == 200 && body.data) {
+        const char *p = strstr(body.data, "\"resourceVersion\"");
+        if (p) {
+            p = strchr(p, ':');
+            if (p) {
+                p++;
+                parse_string(&p, rv, sizeof rv);
+            }
         }
     }
-    free(payload);
+    free(body.data);
+    if (!rv[0]) {
+        free(patch);
+        free(create);
+        return -1;
+    }
+    snprintf(create, cap,
+             "{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",\"metadata\":{\"name\":\"%s\","
+             "\"resourceVersion\":\"%s\",\"labels\":{\"app.kubernetes.io/name\":\"igmpshark\"}},"
+             "\"data\":{\"snapshot\":\"%s\"}}",
+             name, rv, b64);
+    code = kube_request(k, item, "PUT", create, "Content-Type: application/json", &body);
+    free(body.data);
+    free(patch);
+    free(create);
     return (code == 200 || code == 201) ? 0 : -1;
 }
 
@@ -471,9 +532,11 @@ int kube_fetch_snapshots(const char *dir) {
     buf body;
     long code = 0;
     if (http_get(k, url, &code, &body, 3) != 0 || code != 200) {
+        g_http_status = code;
         free(body.data);
         return -1;
     }
+    g_http_status = code;
     struct snap_write w = {dir, 0};
     if (kube_each_snapshot(body.data ? body.data : "", write_one_snapshot, &w) < 0) {
         free(body.data);

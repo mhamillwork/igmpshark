@@ -9,7 +9,7 @@ igmpshark is one process per node. Protocol state, the Kubernetes pod table, and
 3. The parser checks the IPv4 and IGMP checksums and rejects truncated or non-routable groups (`224.0.0.0/24` is ignored).
 4. The engine updates membership. A 50 ms dedup window suppresses the same frame observed on two interfaces. An identical report outside that window is a refresh.
 5. When `--kube` has completed one pod list, a report is accepted only if its source address is a current pod on this node. The packet source alone is not a membership identity.
-6. Snapshots in `--coord-dir` publish this node's joined groups. Other nodes' fresh snapshots become remote subscribers keyed by the publishing node's IP.
+6. Snapshots in `--coord-dir` publish this node's joined groups. Other nodes' fresh snapshots become remote subscribers keyed by the publishing node's CiliumInternalIP, the IPv4 address of `cilium_host`. The application pod IP is not copied to other nodes.
 7. Reconciliation diffs desired state against the backend and applies idempotent operations. Startup grace and a missing pod list suppress deletes.
 
 ## Ownership

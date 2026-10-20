@@ -10,6 +10,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <ifaddrs.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <pcap/pcap.h>
@@ -87,6 +88,28 @@ static int64_t mono_ms(void) {
 static void log_msg(const char *level, const char *msg) {
     fprintf(stderr, "{\"level\":\"%s\",\"msg\":\"%s\",\"node\":\"%s\"}\n", level, msg,
             rt && rt->node_name[0] ? rt->node_name : "");
+}
+
+/* Cilium forwards remote multicast to CiliumInternalIP, the IPv4 address on
+ * cilium_host. status.hostIP is a different address and is not a subscriber. */
+static int iface_ipv4(const char *name, char *out, size_t cap) {
+    struct ifaddrs *list = NULL;
+    if (!name || !name[0] || getifaddrs(&list) != 0)
+        return -1;
+    int rc = -1;
+    for (struct ifaddrs *ifa = list; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
+            continue;
+        if (strcmp(ifa->ifa_name, name) != 0)
+            continue;
+        const struct sockaddr_in *in = (const struct sockaddr_in *)ifa->ifa_addr;
+        if (!inet_ntop(AF_INET, &in->sin_addr, out, (socklen_t)cap))
+            continue;
+        rc = 0;
+        break;
+    }
+    freeifaddrs(list);
+    return rc;
 }
 
 static int link_of_dlt(int dlt) {
@@ -455,7 +478,8 @@ static void usage(void) {
             "  --cilium-dbg PATH       cilium-dbg binary (default cilium-dbg)\n"
             "  --coord-dir PATH        per-node membership snapshots\n"
             "  --node-name NAME        this node\n"
-            "  --node-ip ADDR          CiliumNode internal IP\n"
+            "  --node-ip ADDR          fallback node IP when cilium_host is absent\n"
+            "  --cilium-host-iface IF  interface whose IPv4 is CiliumInternalIP (default cilium_host)\n"
             "  --self-ip ADDR          querier election address\n"
             "  --listen HOST:PORT      health and metrics (default 0.0.0.0:9080)\n"
             "  --control HOST:PORT     line protocol for tests\n"
@@ -488,6 +512,7 @@ int main(int argc, char **argv) {
     char node[64] = "";
     char node_ip[64] = "";
     char self_ip[64] = "";
+    char cilium_host_iface[32] = "cilium_host";
     char control[64] = "";
     int dry = 0, active = 0, immediate = 0, use_kube = 0;
     for (int i = 1; i < argc; i++) {
@@ -539,6 +564,10 @@ int main(int argc, char **argv) {
         } else if (strcmp(a, "--node-ip") == 0) {
             NEED();
             snprintf(node_ip, sizeof node_ip, "%s", v);
+            i++;
+        } else if (strcmp(a, "--cilium-host-iface") == 0) {
+            NEED();
+            snprintf(cilium_host_iface, sizeof cilium_host_iface, "%s", v);
             i++;
         } else if (strcmp(a, "--self-ip") == 0) {
             NEED();
@@ -619,8 +648,17 @@ int main(int argc, char **argv) {
     rt->use_kube = use_kube;
     snprintf(rt->node_name, sizeof rt->node_name, "%s", node);
     snprintf(rt->coord_dir, sizeof rt->coord_dir, "%s", coord);
+    const char *ip_source = "node-ip";
     if (node_ip[0])
         igmp_ip_parse(node_ip, &rt->node_ip);
+    char cilium_ip[64];
+    if (iface_ipv4(cilium_host_iface, cilium_ip, sizeof cilium_ip) == 0 &&
+        igmp_ip_parse(cilium_ip, &rt->node_ip) == 0)
+        ip_source = "cilium_host";
+    else if (strcmp(backend_kind, "cilium") == 0 && cilium_host_iface[0])
+        fprintf(stderr,
+                "{\"level\":\"warn\",\"msg\":\"cilium-host-missing\",\"iface\":\"%s\",\"node\":\"%s\"}\n",
+                cilium_host_iface, node);
     if (strcmp(backend_kind, "cilium") == 0) {
         snprintf(rt->ledger_path, sizeof rt->ledger_path, "%s", ledger);
         rt->mark_from_ledger = 1;
@@ -691,6 +729,11 @@ int main(int argc, char **argv) {
     next_reconcile = now;
     char ctrlbuf[8192];
     size_t ctrl_len = 0;
+    char ipb[32];
+    igmp_ip_fmt(rt->node_ip, ipb, sizeof ipb);
+    fprintf(stderr,
+            "{\"level\":\"info\",\"msg\":\"node-ip\",\"ip\":\"%s\",\"source\":\"%s\",\"node\":\"%s\"}\n",
+            ipb, ip_source, rt->node_name);
     log_msg("info", "started");
     for (;;) {
         if (!manual_time)
@@ -786,8 +829,19 @@ int main(int argc, char **argv) {
             send_pending_queries();
             if (rt->now_ms >= next_reconcile) {
                 scan_ifaces();
-                if (kube_coord && coord[0])
-                    kube_fetch_snapshots(coord);
+                if (kube_coord && coord[0]) {
+                    static long fetch_status = -1;
+                    int fetched = kube_fetch_snapshots(coord);
+                    long st = fetched < 0 ? kube_last_status() : 200;
+                    if (st != fetch_status) {
+                        fetch_status = st;
+                        if (fetched < 0)
+                            fprintf(stderr,
+                                    "{\"level\":\"warn\",\"msg\":\"snapshot-fetch-failed\",\"http\":%ld,"
+                                    "\"node\":\"%s\"}\n",
+                                    st, rt->node_name);
+                    }
+                }
                 igmp_runtime_write_snapshot(rt);
                 if (kube_coord && coord[0] && node[0]) {
                     char path[768];
@@ -798,7 +852,17 @@ int main(int argc, char **argv) {
                         size_t n = fread(text, 1, sizeof text - 1, sf);
                         text[n] = 0;
                         fclose(sf);
-                        kube_publish_snapshot(node, text);
+                        static long publish_status = -1;
+                        int prc = kube_publish_snapshot(node, text);
+                        long st = prc == 0 ? 200 : kube_last_status();
+                        if (st != publish_status) {
+                            publish_status = st;
+                            if (prc != 0)
+                                fprintf(stderr,
+                                        "{\"level\":\"warn\",\"msg\":\"snapshot-publish-failed\",\"http\":%ld,"
+                                        "\"node\":\"%s\"}\n",
+                                        st, rt->node_name);
+                        }
                     }
                 }
                 igmp_runtime_reconcile(rt);

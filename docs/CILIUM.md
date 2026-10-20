@@ -8,7 +8,7 @@ Cilium documents multicast as beta, VXLAN mode, and kernels at least 5.10 on AMD
 
 1. Pod membership. igmpshark tracks group, subscriber IP, pod UID, node, interface index and generation, IGMP version, filter mode, and source list.
 2. Local endpoint forwarding. Cilium's BPF IGMP handler inserts a subscriber-map value whose key is the packet source address and whose remote flag is clear. The group map has to exist first or the handler does not record the subscriber. There is no endpoint-ID delete API.
-3. Remote-node forwarding. `cilium-dbg bpf multicast subscriber add <group> <address>` inserts a key with the remote flag set. The address is the other node's CiliumNode internal IP. Passing a pod IP creates a remote entry for that address and does not fix local forwarding.
+3. Remote-node forwarding. `cilium-dbg bpf multicast subscriber add <group> <address>` inserts a key with the remote flag set. The address is the other node's CiliumInternalIP (`kubectl get ciliumnodes` column `CILIUMINTERNALIP`, the IPv4 address on `cilium_host`). It is not the pod IP and it is not `status.hostIP`. Passing a pod IP creates a remote entry for that address and does not fix local forwarding. A node that has no member of the group does not get a remote row on the node where the application runs. The other node gets one remote row for this node's `cilium_host` address, which is what carries the stream across the VXLAN.
 
 `subscriber delete <group> <address>` deletes whatever key is passed. That is the supported way to drop a stale local entry after a pod crashes without a leave: delete the pod source IP. It is also how a remote node IP is removed. Deleting a remote node IP does not remove a local pod entry, and the reverse is also true.
 

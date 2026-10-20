@@ -33,5 +33,7 @@ uint64_t kube_client_drops(const kube_client *k);
  * text is the snapshot body. Returns 0 on success. */
 int kube_publish_snapshot(const char *node, const char *text);
 int kube_fetch_snapshots(const char *dir);
+/* HTTP status from the last publish or fetch. 0 when the call did not run. */
+long kube_last_status(void);
 
 #endif

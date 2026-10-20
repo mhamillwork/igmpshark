@@ -37,6 +37,7 @@ struct igmp_runtime {
     int queue_depth;
     int queue_cap;
     int coord_ok;
+    int remote_subscribers;
     int last_op_count;
     igmp_op last_ops[128];
     char cleanup_reason[64];

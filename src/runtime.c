@@ -457,6 +457,12 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
         } else {
             rt->coord_ok = 1;
         }
+        if (rt->log_json && nremote != rt->remote_subscribers) {
+            fprintf(stderr,
+                    "{\"level\":\"info\",\"msg\":\"remote-subscribers\",\"count\":%d,\"node\":\"%s\"}\n",
+                    nremote, rt->node_name);
+        }
+        rt->remote_subscribers = nremote;
     }
     int allow_delete = rt->now_ms >= rt->eng->started_ms + rt->eng->cfg.startup_grace_ms;
     if (rt->use_kube && !rt->pods.full_list_ok)
@@ -601,7 +607,9 @@ int igmp_metrics_render(const igmp_runtime *rt, char *buf, size_t len) {
         "# TYPE igmpshark_queries_sent_total counter\n"
         "igmpshark_queries_sent_total %llu\n"
         "# TYPE igmpshark_coord_ok gauge\n"
-        "igmpshark_coord_ok %d\n",
+        "igmpshark_coord_ok %d\n"
+        "# TYPE igmpshark_remote_subscribers gauge\n"
+        "igmpshark_remote_subscribers %d\n",
         (unsigned long long)e->joins, (unsigned long long)e->leaves, igmp_engine_joined_count(e),
         (unsigned long long)e->refreshes, (unsigned long long)e->expires,
         (unsigned long long)e->malformed, (unsigned long long)e->dedup_drops,
@@ -612,6 +620,7 @@ int igmp_metrics_render(const igmp_runtime *rt, char *buf, size_t len) {
         (unsigned long long)rt->cleanups, (unsigned long long)rt->ignored_unbound,
         (unsigned long long)rt->restarts_ignored, (unsigned long long)rt->stale_dropped,
         rt->pods.api_healthy, e->querier_degraded, e->we_are_querier,
-        (unsigned long long)e->queries_seen, (unsigned long long)e->queries_sent, rt->coord_ok);
+        (unsigned long long)e->queries_seen, (unsigned long long)e->queries_sent, rt->coord_ok,
+        rt->remote_subscribers);
     return n;
 }
