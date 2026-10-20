@@ -433,6 +433,33 @@ int kube_publish_snapshot(const char *node, const char *text) {
     return (code == 200 || code == 201) ? 0 : -1;
 }
 
+struct snap_write {
+    const char *dir;
+    int n;
+};
+
+static int write_one_snapshot(void *user, const char *enc) {
+    struct snap_write *w = user;
+    char plain[1 << 16];
+    if (b64_decode(enc, plain, sizeof plain) < 0)
+        return 0;
+    char node[64] = "peer";
+    const char *np = strstr(plain, "NODE ");
+    if (np)
+        sscanf(np + 5, "%63s", node);
+    char path[512];
+    snprintf(path, sizeof path, "%s/%s.snap", w->dir, node);
+    FILE *fp = fopen(path, "w");
+    if (!fp)
+        return 0;
+    fputs(plain, fp);
+    if (plain[0] && plain[strlen(plain) - 1] != '\n')
+        fputc('\n', fp);
+    fclose(fp);
+    w->n++;
+    return 0;
+}
+
 int kube_fetch_snapshots(const char *dir) {
     kube_client *k = oneshot();
     if (!k || !dir)
@@ -447,36 +474,11 @@ int kube_fetch_snapshots(const char *dir) {
         free(body.data);
         return -1;
     }
-    const char *p = body.data ? body.data : "";
-    int n = 0;
-    while ((p = strstr(p, "\"snapshot\"")) != NULL) {
-        const char *s = strchr(p, ':');
-        char enc[1 << 16];
-        char plain[1 << 16];
-        if (!s || parse_string(&s, enc, sizeof enc) != 0) {
-            p += 10;
-            continue;
-        }
-        if (b64_decode(enc, plain, sizeof plain) < 0) {
-            p = s;
-            continue;
-        }
-        char node[64] = "peer";
-        const char *np = strstr(plain, "NODE ");
-        if (np)
-            sscanf(np + 5, "%63s", node);
-        char path[512];
-        snprintf(path, sizeof path, "%s/%s.snap", dir, node);
-        FILE *fp = fopen(path, "w");
-        if (fp) {
-            fputs(plain, fp);
-            if (plain[0] && plain[strlen(plain) - 1] != '\n')
-                fputc('\n', fp);
-            fclose(fp);
-            n++;
-        }
-        p = s;
+    struct snap_write w = {dir, 0};
+    if (kube_each_snapshot(body.data ? body.data : "", write_one_snapshot, &w) < 0) {
+        free(body.data);
+        return -1;
     }
     free(body.data);
-    return n;
+    return w.n;
 }

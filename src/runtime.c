@@ -193,7 +193,8 @@ static void note_peers(igmp_runtime *rt) {
     if (!rt->coord_dir[0] || !rt->eng->cfg.active_querier)
         return;
     igmp_peer peers[64];
-    int n = igmp_coord_peers(rt->coord_dir, rt->node_name, rt->now_ms, rt->snap_max_age_ms, peers, 64);
+    int n = igmp_coord_peers(rt->coord_dir, rt->node_name, igmp_coord_now_ms(), rt->snap_max_age_ms,
+                             peers, 64);
     if (n < 0)
         return;
     for (int i = 0; i < n; i++) {
@@ -344,7 +345,7 @@ int igmp_runtime_write_snapshot(igmp_runtime *rt) {
         return -1;
     int n = collect_snaps(rt, mem, IGMP_MAX_MEMBERS);
     int rc = igmp_coord_write(rt->coord_dir, rt->node_name, rt->node_ip, rt->eng->cfg.active_querier,
-                              rt->now_ms, mem, n);
+                              igmp_coord_now_ms(), mem, n);
     free(mem);
     return rc;
 }
@@ -446,7 +447,8 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
     int nstale = 0;
     int allow_remote = 1;
     if (rt->coord_dir[0]) {
-        nremote = igmp_coord_load_remote(rt->coord_dir, rt->node_name, rt->now_ms, rt->snap_max_age_ms,
+        nremote = igmp_coord_load_remote(rt->coord_dir, rt->node_name, igmp_coord_now_ms(),
+                                         rt->snap_max_age_ms,
                                          remote, 2048, stale, 128, &nstale);
         if (nremote < 0) {
             nremote = 0;

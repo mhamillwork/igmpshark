@@ -12,4 +12,9 @@ int kube_parse_pod_list(const char *json, int (*cb)(void *user, const kube_event
  * Returns 1 when ev was filled. */
 int kube_parse_watch_line(const char *line, kube_event *ev);
 
+/* Each ConfigMap data.snapshot string in a list body. The value starts after
+ * the colon; pointing the string parser at the colon skips every snapshot.
+ * cb returning non-zero stops the walk. Returns how many values were delivered. */
+int kube_each_snapshot(const char *json, int (*cb)(void *user, const char *b64), void *user);
+
 #endif

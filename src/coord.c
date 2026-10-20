@@ -6,6 +6,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
+
+/* A peer clock a little ahead of ours is still a live snapshot. */
+enum { IGMP_SNAP_FUTURE_SKEW_MS = 30000 };
+
+int64_t igmp_coord_now_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+        return 0;
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 static int same_name(const char *a, const char *b) {
     return a && b && strcmp(a, b) == 0;
@@ -138,7 +149,8 @@ int igmp_coord_peers(const char *dir, const char *self_node, int64_t now_ms, int
         igmp_peer peer;
         if (igmp_coord_parse(buf, &peer, NULL, 0, NULL) != 0 || !peer.name[0])
             continue;
-        peer.fresh = max_age_ms <= 0 || (now_ms >= peer.ts_ms && now_ms - peer.ts_ms <= max_age_ms);
+        int64_t age = now_ms - peer.ts_ms;
+        peer.fresh = max_age_ms <= 0 || (age >= -IGMP_SNAP_FUTURE_SKEW_MS && age <= max_age_ms);
         out[n++] = peer;
     }
     closedir(d);

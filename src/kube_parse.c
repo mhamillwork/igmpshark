@@ -4,6 +4,7 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *skip_ws(const char *p, const char *end) {
@@ -212,4 +213,33 @@ int kube_parse_watch_line(const char *line, kube_event *ev) {
         obj_end = limit;
     }
     return fill_pod(start, obj_end, ev, deleted) == 0;
+}
+
+int kube_each_snapshot(const char *json, int (*cb)(void *user, const char *b64), void *user) {
+    if (!json || !cb)
+        return -1;
+    const char *end = json + strlen(json);
+    const char *p = json;
+    char *enc = malloc(1 << 16);
+    if (!enc)
+        return -1;
+    int n = 0;
+    while (p < end && (p = strstr(p, "\"snapshot\"")) != NULL) {
+        const char *s = strchr(p, ':');
+        if (!s || s >= end) {
+            p += 10;
+            continue;
+        }
+        s++;
+        if (parse_string(&s, end, enc, 1 << 16) != 0) {
+            p += 10;
+            continue;
+        }
+        n++;
+        if (cb(user, enc) != 0)
+            break;
+        p = s;
+    }
+    free(enc);
+    return n;
 }

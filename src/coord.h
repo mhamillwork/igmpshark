@@ -21,6 +21,10 @@ typedef struct igmp_peer {
     int fresh;
 } igmp_peer;
 
+/* Realtime milliseconds. Snapshot NODE timestamps use this so another node
+ * can age them. Protocol timers stay on the monotonic clock. */
+int64_t igmp_coord_now_ms(void);
+
 /* Atomic snapshot. members may be NULL when nmem is 0. */
 int igmp_coord_write(const char *dir, const char *node, uint32_t node_ip, int active,
                      int64_t now_ms, const igmp_snap_mem *members, int nmem);

@@ -310,7 +310,8 @@ static void test_retry_and_stale(void) {
     mem.joined = 1;
     mem.ifindex = 1;
     mem.ifgen = 1;
-    expect(igmp_coord_write(dir, "n2", ip4("10.244.1.1"), 0, 0, &mem, 1) == 0, "peer snap");
+    expect(igmp_coord_write(dir, "n2", ip4("10.244.1.1"), 0, igmp_coord_now_ms(), &mem, 1) == 0,
+           "peer snap");
     uint8_t frame[128];
     size_t n = v2_report(frame, ip4("10.4.0.1"), mem.group);
     igmp_runtime_on_frame(rt, frame, n, IGMP_LINK_ETHERNET, 1, 1);
@@ -431,7 +432,7 @@ static void test_refcount_and_querier(void) {
     igmp_runtime_write_snapshot(a);
     igmp_runtime_reconcile(b);
     expect(has_op(b, IGMP_OP_REMOTE_DEL, ip4("10.244.0.2")), "node removed at count zero");
-    igmp_coord_write(dir, "low", ip4("10.244.0.1"), 1, 0, NULL, 0);
+    igmp_coord_write(dir, "low", ip4("10.244.0.1"), 1, igmp_coord_now_ms(), NULL, 0);
     a->eng->cfg.active_querier = 1;
     a->eng->cfg.self_ip = ip4("10.244.0.2");
     a->eng->we_are_querier = 1;
@@ -493,6 +494,57 @@ static void test_quiet_subscriber_and_queue(void) {
     free(dir);
 }
 
+static void test_snap_clock(void) {
+    char *dir = tmpdir();
+    int64_t now = igmp_coord_now_ms();
+    igmp_snap_mem mem;
+    memset(&mem, 0, sizeof mem);
+    mem.group = ip4("239.4.4.4");
+    mem.subscriber = ip4("10.4.0.8");
+    mem.joined = 1;
+    expect(igmp_coord_write(dir, "near", ip4("10.244.1.2"), 0, now + 20000, &mem, 1) == 0,
+           "near future snap");
+    expect(igmp_coord_write(dir, "far", ip4("10.244.1.3"), 0, now + 120000, &mem, 1) == 0,
+           "far future snap");
+    expect(igmp_coord_write(dir, "old", ip4("10.244.1.4"), 0, now - 600000, &mem, 1) == 0, "old snap");
+    igmp_peer peers[8];
+    int n = igmp_coord_peers(dir, "self", now, 4200, peers, 8);
+    expect(n == 3, "three peers");
+    int near = 0, far = 0, old = 0;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(peers[i].name, "near") == 0)
+            near = peers[i].fresh;
+        if (strcmp(peers[i].name, "far") == 0)
+            far = peers[i].fresh;
+        if (strcmp(peers[i].name, "old") == 0)
+            old = peers[i].fresh;
+    }
+    expect(near == 1, "20s future skew stays fresh");
+    expect(far == 0, "2min future skew is stale");
+    expect(old == 0, "old snap is stale");
+    free(dir);
+}
+
+static int grab_snap(void *user, const char *b64) {
+    char **out = user;
+    *out = strdup(b64);
+    return 0;
+}
+
+static void test_snapshot_field(void) {
+    const char *json = "{\"items\":[{\"metadata\":{\"name\":\"igmpshark-ws-g3-281\"},"
+                       "\"data\":{\"snapshot\":\"Tk9ERSB3cy1nMy0yODEgMTAuMC4wLjEgMCAxCg==\"}}]}";
+    char *b64 = NULL;
+    int n = kube_each_snapshot(json, grab_snap, &b64);
+    expect(n == 1 && b64 && strncmp(b64, "Tk9ERS", 6) == 0, "snapshot value follows the colon");
+    free(b64);
+    const char *pretty = "{\n  \"data\": {\n    \"snapshot\":\n      \"QUJD\"\n  }\n}\n";
+    b64 = NULL;
+    n = kube_each_snapshot(pretty, grab_snap, &b64);
+    expect(n == 1 && b64 && strcmp(b64, "QUJD") == 0, "snapshot value after whitespace");
+    free(b64);
+}
+
 static int keep_pod(void *user, const kube_event *ev) {
     kube_event *slot = user;
     if (ev->kind == KUBE_EV_UPSERT && strcmp(ev->name, "repbox-0") == 0)
@@ -537,6 +589,8 @@ int main(void) {
     test_refcount_and_querier();
     test_quiet_subscriber_and_queue();
     test_pod_list_without_kind();
+    test_snap_clock();
+    test_snapshot_field();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

@@ -63,7 +63,8 @@ securityContext:
 # devices). Confirm with a short tcpdump before expecting joins.
 hostNetwork: true
 # cilium-dbg reads /proc/self/mountinfo to find the agent's bpffs. hostPID
-# lets the helper find cilium-agent and join its namespaces.
+# lets the helper see cilium-agent in /proc and join its namespaces. Without
+# it, pid 1 inside the pod is igmpshark and the agent cannot be found.
 hostPID: true
 dnsPolicy: ClusterFirstWithHostNet
 

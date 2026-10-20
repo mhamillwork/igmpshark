@@ -14,7 +14,7 @@ igmpshark is one process per node. Protocol state, the Kubernetes pod table, and
 
 ## Ownership
 
-Each node writes only `<coord-dir>/<node-name>.snap`, by renaming a temporary file. Readers never write another node's file. A snapshot older than two membership intervals, or a snapshot whose timestamp is ahead of the local clock, is not used to remove remote entries; those node IPs are held. If the directory cannot be read, remote deletes are skipped entirely. Local timer expiry and explicit pod deletion still proceed.
+Each node writes only `<coord-dir>/<node-name>.snap`, by renaming a temporary file. Readers never write another node's file. The `NODE` timestamp is wall-clock milliseconds. A snapshot older than two membership intervals, or more than 30 seconds ahead of this node's wall clock, is not installed as a remote subscriber. Those node IPs are held, so a stale peer is not deleted either. If the directory cannot be read, remote deletes are skipped entirely. Local timer expiry and explicit pod deletion still proceed.
 
 With `--kube-coord`, the same text is published as a ConfigMap named `igmpshark-<node>` labeled `app.kubernetes.io/name=igmpshark`, base64-encoded under `data.snapshot`. Peers are fetched into the local coord directory before this node rewrites its own file, so a fetch cannot roll the local snapshot backwards. ConfigMap mode was not executed against an API server here. The file directory is what the simulation tests.
 
@@ -44,4 +44,4 @@ The capture queue defaults to 64 frames. Overflow increments `igmpshark_queue_dr
 
 ## Clocks
 
-Protocol timers use the monotonic clock. The control socket's `NOW` command, used by tests, rebases the grace clock onto that logical time on the first use. Production does not set `NOW`.
+Protocol timers use the monotonic clock. Snapshot timestamps use the realtime clock so a peer file written on another node can be aged here. A timestamp up to 30 seconds ahead of this node is still fresh. The control socket's `NOW` command, used by tests, rebases the grace clock onto that logical time on the first use. Production does not set `NOW`.
