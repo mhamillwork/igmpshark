@@ -368,7 +368,7 @@ static int collect_snaps(igmp_runtime *rt, igmp_snap_mem *mem, int cap) {
     int n = 0;
     for (int i = 0; i < IGMP_MAX_MEMBERS && n < cap; i++) {
         igmp_member *m = &rt->eng->members[i];
-        if (!m->used || !m->joined)
+        if (!m->used || !m->joined || m->lmq_left > 0)
             continue;
         mem[n].group = m->group;
         mem[n].subscriber = m->subscriber;
@@ -423,7 +423,10 @@ static int fill_local(igmp_runtime *rt, igmp_local_sub *local, int cap) {
             continue;
         local[n].group = m->group;
         local[n].subscriber = m->subscriber;
-        local[n].joined = m->joined;
+        /* Last-member wait still holds the slot so a late report can rejoin,
+         * but the pod has left. Publishing it makes every other node keep a
+         * remote subscriber, and injecting TO_EX puts the Cilium row back. */
+        local[n].joined = m->joined && m->lmq_left == 0;
         n++;
     }
     return n;
@@ -468,7 +471,7 @@ static int solicit_version(const igmp_engine *e, uint32_t group, int only_missin
     int version = 0;
     for (int i = 0; i < IGMP_MAX_MEMBERS; i++) {
         const igmp_member *m = &e->members[i];
-        if (!m->used || !m->joined || m->group != group)
+        if (!m->used || !m->joined || m->lmq_left > 0 || m->group != group)
             continue;
         if (only_missing && actual_has_local(actual, nactual, group, m->subscriber))
             continue;
@@ -499,7 +502,7 @@ static int solicit_missing_locals(igmp_runtime *rt, const igmp_actual *actual, i
     for (int n = 0; n < IGMP_MAX_MEMBERS; n++) {
         int i = (start + n) % IGMP_MAX_MEMBERS;
         const igmp_member *m = &rt->eng->members[i];
-        if (!m->used || !m->joined || !actual_has_group(actual, nactual, m->group))
+        if (!m->used || !m->joined || m->lmq_left > 0 || !actual_has_group(actual, nactual, m->group))
             continue;
         if (actual_has_local(actual, nactual, m->group, m->subscriber))
             continue;
@@ -535,7 +538,7 @@ static void queue_joins_for_group(igmp_runtime *rt, uint32_t group, const igmp_a
     igmp_rt_extra *x = extra(rt);
     for (int i = 0; i < IGMP_MAX_MEMBERS; i++) {
         const igmp_member *m = &rt->eng->members[i];
-        if (!m->used || !m->joined || m->group != group)
+        if (!m->used || !m->joined || m->lmq_left > 0 || m->group != group)
             continue;
         if (actual_has_local(actual, nactual, group, m->subscriber))
             continue;
@@ -552,7 +555,7 @@ static void queue_missing_joins(igmp_runtime *rt, const igmp_actual *actual, int
     for (int n = 0; n < IGMP_MAX_MEMBERS; n++) {
         int i = (start + n) % IGMP_MAX_MEMBERS;
         const igmp_member *m = &rt->eng->members[i];
-        if (!m->used || !m->joined)
+        if (!m->used || !m->joined || m->lmq_left > 0)
             continue;
         if (!actual_has_group(actual, nactual, m->group))
             continue;

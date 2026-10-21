@@ -186,19 +186,35 @@ static void mark_joined(igmp_engine *e, igmp_member *m, int version, int64_t now
     refresh_attachment(e, m->group, m->ifindex, m->ifgen, now_ms);
 }
 
+/* The subscriber is the packet source. Capture on "any" does not promise
+ * the leave arrives on the same ifindex as the join, so every slot for this
+ * group and source has to leave together. */
+static int leave_subscriber(igmp_engine *e, uint32_t group, uint32_t src, int64_t now_ms) {
+    int n = 0;
+    for (int i = 0; i < IGMP_MAX_MEMBERS; i++) {
+        igmp_member *m = &e->members[i];
+        if (!m->used || !m->joined || m->group != group || m->subscriber != src)
+            continue;
+        arm_leave(e, m, m->ifindex, now_ms);
+        n++;
+    }
+    return n;
+}
+
 static int apply_v3_record(igmp_engine *e, const igmp_record *rec, uint32_t src,
                            uint32_t ifindex, uint32_t ifgen, int64_t now_ms) {
     if (!igmp_group_routable(rec->group) || rec->type < 1 || rec->type > 6) {
         e->ignored++;
         return -1;
     }
-    int created = 0;
-    igmp_member *m = find_slot(e, rec->group, src, ifindex, ifgen);
-    if (!m && (rec->type == IGMP_REC_IS_INCLUDE || rec->type == IGMP_REC_TO_INCLUDE) &&
+    if ((rec->type == IGMP_REC_IS_INCLUDE || rec->type == IGMP_REC_TO_INCLUDE) &&
         rec->n_sources == 0) {
-        e->ignored++;
+        if (leave_subscriber(e, rec->group, src, now_ms) == 0)
+            e->ignored++;
         return 0;
     }
+    int created = 0;
+    igmp_member *m = find_slot(e, rec->group, src, ifindex, ifgen);
     if (!m) {
         m = ensure_member(e, rec->group, src, ifindex, ifgen, &created);
         if (!m)
@@ -377,12 +393,10 @@ int igmp_engine_on_message(igmp_engine *e, const igmp_message *msg,
         return -1;
     }
     if (msg->kind == IGMP_KIND_V2_LEAVE) {
-        igmp_member *m = find_slot(e, msg->group, msg->src, ifindex, ifgen);
-        if (!m || !m->joined) {
+        if (leave_subscriber(e, msg->group, msg->src, now_ms) == 0) {
             e->ignored++;
             return 0;
         }
-        arm_leave(e, m, ifindex, now_ms);
         return 0;
     }
     if (msg->kind == IGMP_KIND_V1_REPORT || msg->kind == IGMP_KIND_V2_REPORT) {

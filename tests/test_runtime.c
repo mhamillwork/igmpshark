@@ -60,6 +60,14 @@ static size_t build_frame(uint8_t *out, uint32_t src, uint32_t dst, const uint8_
     memcpy(ip + 20, igmp, n);
     return 14 + 20 + n;
 }
+static size_t v2_leave(uint8_t *frame, uint32_t src, uint32_t group) {
+    uint8_t igmp[8];
+    memset(igmp, 0, sizeof igmp);
+    igmp[0] = 0x17;
+    put32(igmp + 4, group);
+    finish_igmp(igmp, 8);
+    return build_frame(frame, src, group, igmp, 8);
+}
 static size_t v2_report(uint8_t *frame, uint32_t src, uint32_t group) {
     uint8_t igmp[8];
     memset(igmp, 0, sizeof igmp);
@@ -853,6 +861,45 @@ static void test_pod_list_without_kind(void) {
     expect(ev.ip == ip4("10.42.5.31") && strcmp(ev.node, "ws-g3-281") == 0, "watch pod identity");
 }
 
+static void test_leave_is_not_reinjected(void) {
+    char *dir = tmpdir();
+    char state[512];
+    snprintf(state, sizeof state, "%s/map", dir);
+    FILE *fp = fopen(state, "w");
+    fprintf(fp, "239.1.2.3 10.42.7.178 0 1\n");
+    fprintf(fp, "239.1.2.3 0.0.0.0 1 1\n");
+    fclose(fp);
+    igmp_runtime *rt = make_rt(dir, "ws-g3-160", "10.42.7.110", 0);
+    attach_file(rt, state, 0);
+    uint8_t frame[256];
+    uint32_t g = ip4("239.1.2.3");
+    uint32_t s = ip4("10.42.7.178");
+    rt->now_ms = 1000;
+    size_t n = v2_report(frame, s, g);
+    igmp_runtime_on_frame(rt, frame, n, IGMP_LINK_ETHERNET, 1, 1);
+    rt->now_ms = 1100;
+    n = v2_leave(frame, s, g);
+    igmp_runtime_on_frame(rt, frame, n, IGMP_LINK_ETHERNET, 4, 1);
+    igmp_runtime_reconcile(rt);
+    igmp_local_join js[8];
+    expect(igmp_runtime_take_joins(rt, js, 8) == 0, "leaving pod is not injected again");
+    expect(has_op(rt, IGMP_OP_LOCAL_DEL, s), "cilium local row is deleted while the leave waits");
+    igmp_runtime_write_snapshot(rt);
+    char path[512];
+    snprintf(path, sizeof path, "%s/ws-g3-160.snap", dir);
+    fp = fopen(path, "r");
+    expect(fp != NULL, "snapshot written");
+    char body[1024];
+    size_t got = fp ? fread(body, 1, sizeof body - 1, fp) : 0;
+    if (fp)
+        fclose(fp);
+    body[got] = 0;
+    expect(strstr(body, "10.42.7.178") == NULL, "snapshot stops publishing the leaving pod");
+    free(rt->backend);
+    igmp_runtime_free(rt);
+    free(dir);
+}
+
 static void test_cilium_host_annotation(void) {
     const char *json =
         "{\"kind\":\"NodeList\",\"items\":["
@@ -1024,6 +1071,7 @@ int main(void) {
     test_rewrite_remote_identity();
     test_runtime_uses_identity();
     test_toex_and_trie();
+    test_leave_is_not_reinjected();
     test_cilium_host_annotation();
     test_already_exists_is_success();
     test_orphan_remote_without_ledger();

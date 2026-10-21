@@ -168,6 +168,31 @@ static void test_v1_and_leave(void) {
     expect(igmp_engine_find(&E, g, a, 1, NULL) == 1, "a preserved");
 }
 
+static void test_leave_on_other_ifindex(void) {
+    setup(0);
+    uint32_t g = ip4("239.2.9.9");
+    uint32_t s = ip4("10.42.7.178");
+    size_t n = v2_report(frame, s, g);
+    igmp_engine_on_frame(&E, frame, n, IGMP_LINK_ETHERNET, 5, 1, 0);
+    n = v2_leave(frame, s, g);
+    igmp_engine_on_frame(&E, frame, n, IGMP_LINK_ETHERNET, 9, 1, 20);
+    const igmp_member *m = NULL;
+    expect(igmp_engine_find(&E, g, s, 5, &m) == 1 && m && m->lmq_left > 0,
+           "leave on another interface starts last-member wait");
+    setup(0);
+    n = v2_report(frame, s, g);
+    igmp_engine_on_frame(&E, frame, n, IGMP_LINK_ETHERNET, 5, 1, 0);
+    igmp_record rec;
+    memset(&rec, 0, sizeof rec);
+    rec.type = IGMP_REC_TO_INCLUDE;
+    rec.group = g;
+    n = v3_report(frame, s, &rec, 1);
+    igmp_engine_on_frame(&E, frame, n, IGMP_LINK_ETHERNET, 8, 1, 30);
+    m = NULL;
+    expect(igmp_engine_find(&E, g, s, 5, &m) == 1 && m && m->lmq_left > 0,
+           "to_in on another interface starts last-member wait");
+}
+
 static void test_immediate_leave_single(void) {
     setup(0);
     E.cfg.immediate_leave = 1;
@@ -515,6 +540,7 @@ static void test_bulk_leave_without_querier(void) {
 int main(void) {
     test_parse_and_join();
     test_v1_and_leave();
+    test_leave_on_other_ifindex();
     test_immediate_leave_single();
     test_shared_suppression();
     test_no_expire_without_querier();
