@@ -30,6 +30,7 @@ typedef struct igmp_rt_extra {
     int n_retry;
     int retry_cap;
     uint64_t retry_gen;
+    int solicit_at;
     igmp_iface ifaces[64];
 } igmp_rt_extra;
 
@@ -396,6 +397,74 @@ static void apply_ledger_marks(igmp_runtime *rt, igmp_actual *rows, int n) {
     }
 }
 
+static int actual_has_local(const igmp_actual *actual, int n, uint32_t group, uint32_t addr) {
+    for (int i = 0; i < n; i++)
+        if (actual[i].group == group && !actual[i].remote && actual[i].addr == addr)
+            return 1;
+    return 0;
+}
+
+static int actual_has_group(const igmp_actual *actual, int n, uint32_t group) {
+    for (int i = 0; i < n; i++)
+        if (actual[i].group == group)
+            return 1;
+    return 0;
+}
+
+/* Lowest joined version on this group. v2 hosts ignore a v3 query, and a v3
+ * host answers a v2 query. only_missing limits the choice to members that
+ * Cilium has not yet recorded as local subscribers. Returns 0 when none. */
+static int solicit_version(const igmp_engine *e, uint32_t group, int only_missing,
+                           const igmp_actual *actual, int nactual) {
+    int version = 0;
+    for (int i = 0; i < IGMP_MAX_MEMBERS; i++) {
+        const igmp_member *m = &e->members[i];
+        if (!m->used || !m->joined || m->group != group)
+            continue;
+        if (only_missing && actual_has_local(actual, nactual, group, m->subscriber))
+            continue;
+        int v = m->version >= 3 ? 3 : 2;
+        if (version == 0 || v < version)
+            version = v;
+    }
+    return version;
+}
+
+static int solicit_group(igmp_runtime *rt, uint32_t group, int version) {
+    if (version <= 0)
+        return 0;
+    int rc = igmp_engine_solicit(rt->eng, group, 0, version);
+    return rc > 0 ? 1 : rc;
+}
+
+/* Groups already in the map but missing the pod address. One query per group,
+ * continuing from the previous pass so a full queue cannot starve the tail. */
+static int solicit_missing_locals(igmp_runtime *rt, const igmp_actual *actual, int nactual) {
+    if (!rt->eng->cfg.solicit_reports || nactual <= 0)
+        return 0;
+    igmp_rt_extra *x = extra(rt);
+    int start = x->solicit_at;
+    if (start < 0 || start >= IGMP_MAX_MEMBERS)
+        start = 0;
+    int queued = 0;
+    for (int n = 0; n < IGMP_MAX_MEMBERS; n++) {
+        int i = (start + n) % IGMP_MAX_MEMBERS;
+        const igmp_member *m = &rt->eng->members[i];
+        if (!m->used || !m->joined || !actual_has_group(actual, nactual, m->group))
+            continue;
+        if (actual_has_local(actual, nactual, m->group, m->subscriber))
+            continue;
+        int rc = solicit_group(rt, m->group, solicit_version(rt->eng, m->group, 1, actual, nactual));
+        if (rc < 0) {
+            x->solicit_at = i;
+            return queued;
+        }
+        queued += rc;
+    }
+    x->solicit_at = 0;
+    return queued;
+}
+
 static void ledger_after_op(igmp_runtime *rt, const igmp_op *op) {
     if (!rt->ledger_path[0])
         return;
@@ -503,6 +572,9 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
         return nop;
     }
     int applied = 0;
+    int deferred = 0;
+    int failed = 0;
+    int solicited = 0;
     for (int i = 0; i < nop; i++) {
         if (applied >= IGMP_APPLY_PER_PASS) {
             int left = nop - i;
@@ -511,18 +583,8 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
             memcpy(x->retry, &ops[i], (size_t)left * sizeof(igmp_op));
             x->n_retry = left;
             x->retry_gen = rt->gen;
-            if (rt->log_json) {
-                fprintf(stderr,
-                        "{\"level\":\"info\",\"msg\":\"reconcile-deferred\",\"remaining\":%d,"
-                        "\"node\":\"%s\"}\n",
-                        left, rt->node_name);
-            }
-            free(actual);
-            free(local);
-            free(remote);
-            free(ops);
-            (void)from_retry;
-            return applied;
+            deferred = left;
+            break;
         }
         if (rt->backend->apply(rt->backend, &ops[i]) != 0) {
             int left = nop - i;
@@ -531,25 +593,48 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
             memcpy(x->retry, &ops[i], (size_t)left * sizeof(igmp_op));
             x->n_retry = left;
             x->retry_gen = rt->gen;
-            rt->reconcile_failures++;
-            log_backend(rt, "backend-apply-failed");
-            free(actual);
-            free(local);
-            free(remote);
-            free(ops);
-            (void)from_retry;
-            return -1;
+            failed = 1;
+            break;
         }
         applied++;
         rt->mutations++;
         ledger_after_op(rt, &ops[i]);
+        /* The group map exists only after this add. A remote-only group has
+         * no local member here, so it is not solicited. */
+        if (ops[i].op == IGMP_OP_GROUP_ADD) {
+            int rc = solicit_group(rt, ops[i].group,
+                                   solicit_version(rt->eng, ops[i].group, 0, NULL, 0));
+            if (rc > 0)
+                solicited += rc;
+        }
     }
-    x->n_retry = 0;
-    rt->reconcile_ok++;
+    if (!failed && !continue_plan)
+        solicited += solicit_missing_locals(rt, actual, nactual);
+    if (rt->log_json && solicited > 0) {
+        fprintf(stderr,
+                "{\"level\":\"info\",\"msg\":\"local-solicit\",\"count\":%d,\"node\":\"%s\"}\n",
+                solicited, rt->node_name);
+    }
+    if (deferred > 0 && rt->log_json) {
+        fprintf(stderr,
+                "{\"level\":\"info\",\"msg\":\"reconcile-deferred\",\"remaining\":%d,"
+                "\"node\":\"%s\"}\n",
+                deferred, rt->node_name);
+    }
     free(actual);
     free(local);
     free(remote);
     free(ops);
+    (void)from_retry;
+    if (failed) {
+        rt->reconcile_failures++;
+        log_backend(rt, "backend-apply-failed");
+        return -1;
+    }
+    if (deferred > 0)
+        return applied;
+    x->n_retry = 0;
+    rt->reconcile_ok++;
     return nop;
 }
 

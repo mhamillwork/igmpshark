@@ -307,6 +307,39 @@ static void test_identity_cleanup(void) {
     expect(igmp_engine_find(&E, g1, a, 1, NULL) == 1, "other iface kept");
 }
 
+static void test_solicit_without_querier(void) {
+    setup(0);
+    E.cfg.solicit_reports = 1;
+    expect(E.we_are_querier == 0, "passive node is not querier");
+    expect(E.querier_degraded == 1, "passive starts degraded");
+    uint32_t g = ip4("239.8.8.8");
+    uint32_t s = ip4("10.8.0.5");
+    size_t n = v2_report(frame, s, g);
+    igmp_engine_on_frame(&E, frame, n, IGMP_LINK_ETHERNET, 3, 1, 1000);
+    igmp_query_out qs[8];
+    int qn = 0;
+    igmp_engine_take_queries(&E, qs, &qn, 8);
+    expect(qn == 0 && E.queries_sent == 0, "join does not solicit before the group exists");
+    expect(igmp_engine_solicit(&E, g, 3, 2) == 1, "solicit queues without being querier");
+    expect(igmp_engine_solicit(&E, g, 3, 2) == 0, "duplicate group is one query");
+    expect(E.queries_sent == 1, "one query counted");
+    igmp_engine_take_queries(&E, qs, &qn, 8);
+    expect(qn == 1 && qs[0].group == g && qs[0].version == 2, "group query is queued");
+    n = v2_query(frame, E.cfg.self_ip, g);
+    igmp_engine_on_frame(&E, frame, n, IGMP_LINK_ETHERNET, 3, 1, 1100);
+    expect(E.querier_degraded == 1 && E.queries_seen == 0, "own query is not a foreign querier");
+    expect(igmp_engine_joined_count(&E) == 1, "own query keeps the member");
+    n = v2_query(frame, ip4("10.0.0.9"), 0);
+    igmp_engine_on_frame(&E, frame, n, IGMP_LINK_ETHERNET, 3, 1, 1200);
+    expect(E.querier_degraded == 0 && E.queries_seen == 1, "foreign query still arms expiry");
+    int filled = 0;
+    for (int i = 0; i < 32; i++)
+        if (igmp_engine_solicit(&E, g + 1 + (uint32_t)i, 0, 2) == 1)
+            filled++;
+    expect(filled == 32, "queue accepts 32 group queries");
+    expect(igmp_engine_solicit(&E, g + 100, 0, 2) == -1, "full queue is reported");
+}
+
 static void test_querier_election(void) {
     setup(1);
     expect(E.we_are_querier == 1, "starts as querier when active");
@@ -489,6 +522,7 @@ int main(void) {
     test_bulk_leave_without_querier();
     test_malformed_and_dedup();
     test_identity_cleanup();
+    test_solicit_without_querier();
     test_querier_election();
     test_reconcile();
     test_lmq_response_and_churn();

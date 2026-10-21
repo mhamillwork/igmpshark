@@ -31,7 +31,7 @@ Arguments are a fixed argv. The list parser accepts `Group Subscriber Type` rows
 
 ## What Cilium already does
 
-Cilium snoops IGMP in the datapath and can install local subscribers on its own. igmpshark still creates the group first, solicits a fresh report when it is the querier, and deletes entries the datapath will not delete after a crash. Cilium restart recreates empty maps; the next reconcile adds desired groups and remote nodes again. igmpshark does not restart Cilium or flush unrelated endpoints.
+Cilium snoops IGMP in the datapath and can install local subscribers on its own, but only after the group map exists. igmpshark creates the group first, then sends a group-specific query into the pod veth (`lxc*`) so the pod reports again and Cilium inserts the local entry. That solicit runs whether or not this node is the querier. It does not subscriber-add the pod IP. Cilium restart recreates empty maps; the next reconcile adds desired groups and remote nodes again, then solicits local members whose pod address is missing. igmpshark does not restart Cilium or flush unrelated endpoints. A large delete or add walks eight `cilium-dbg` calls per reconcile, so clearing many remote rows takes several passes.
 
 Filter mode and source lists follow RFC 3376 inside the engine. Cilium forwarding is group-wide. An INCLUDE source list does not restrict which sources Cilium forwards.
 

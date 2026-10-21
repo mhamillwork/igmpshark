@@ -572,6 +572,109 @@ static int keep_pod(void *user, const kube_event *ev) {
     return 0;
 }
 
+static void test_solicit_repairs_local(void) {
+    char *dir = tmpdir();
+    char state[512];
+    snprintf(state, sizeof state, "%s/state", dir);
+    FILE *fp = fopen(state, "w");
+    expect(fp != NULL, "state file");
+    if (fp)
+        fclose(fp);
+    igmp_runtime *rt = make_rt(dir, "n1", "10.244.0.1", 0);
+    rt->eng->cfg.solicit_reports = 1;
+    rt->log_json = 0;
+    expect(rt->eng->we_are_querier == 0, "repair does not require the querier");
+    attach_file(rt, state, 0);
+    uint8_t frame[128];
+    uint32_t g = ip4("239.1.1.1");
+    uint32_t sub = ip4("10.1.0.5");
+    size_t n = v2_report(frame, sub, g);
+    igmp_runtime_on_frame(rt, frame, n, IGMP_LINK_ETHERNET, 2, 1);
+    expect(rt->eng->queries_sent == 0, "report alone does not solicit");
+    int ops = igmp_runtime_reconcile(rt);
+    expect(ops >= 1 && has_op(rt, IGMP_OP_GROUP_ADD, 0), "group is added");
+    igmp_query_out qs[40];
+    int qn = 0;
+    igmp_engine_take_queries(rt->eng, qs, &qn, 40);
+    expect(qn == 1 && qs[0].group == g && qs[0].version == 2, "solicit follows the group add");
+    igmp_runtime_reconcile(rt);
+    igmp_engine_take_queries(rt->eng, qs, &qn, 40);
+    expect(qn == 1 && qs[0].group == g, "missing local endpoint is solicited again");
+    fp = fopen(state, "w");
+    fputs("239.1.1.1 0.0.0.0 1 1\n239.1.1.1 10.1.0.5 0 1\n", fp);
+    fclose(fp);
+    int steady = igmp_runtime_reconcile(rt);
+    igmp_engine_take_queries(rt->eng, qs, &qn, 40);
+    expect(steady == 0 && qn == 0, "local endpoint present stops the solicit");
+
+    igmp_runtime *dry = make_rt(dir, "n1", "10.244.0.1", 0);
+    dry->eng->cfg.solicit_reports = 1;
+    dry->log_json = 0;
+    char state2[512];
+    snprintf(state2, sizeof state2, "%s/dry", dir);
+    fp = fopen(state2, "w");
+    fclose(fp);
+    attach_file(dry, state2, 1);
+    n = v2_report(frame, sub, g);
+    igmp_runtime_on_frame(dry, frame, n, IGMP_LINK_ETHERNET, 2, 1);
+    igmp_runtime_reconcile(dry);
+    igmp_engine_take_queries(dry->eng, qs, &qn, 40);
+    expect(qn == 0 && dry->eng->queries_sent == 0, "dry-run does not solicit");
+    free(rt->backend);
+    free(dry->backend);
+    igmp_runtime_free(rt);
+    igmp_runtime_free(dry);
+    free(dir);
+}
+
+static void test_solicit_covers_every_group(void) {
+    char *dir = tmpdir();
+    char state[512];
+    snprintf(state, sizeof state, "%s/state", dir);
+    FILE *fp = fopen(state, "w");
+    uint32_t groups[40];
+    for (int i = 0; i < 40; i++) {
+        char gbuf[32];
+        snprintf(gbuf, sizeof gbuf, "239.9.0.%d", i + 1);
+        groups[i] = ip4(gbuf);
+        fprintf(fp, "%s 0.0.0.0 1 1\n", gbuf);
+    }
+    fclose(fp);
+    igmp_runtime *rt = make_rt(dir, "n1", "10.244.0.1", 0);
+    rt->eng->cfg.solicit_reports = 1;
+    rt->log_json = 0;
+    attach_file(rt, state, 0);
+    uint8_t frame[128];
+    for (int i = 0; i < 40; i++) {
+        rt->now_ms = (int64_t)(i + 1) * 1000;
+        size_t n = v2_report(frame, ip4("10.9.0.1"), groups[i]);
+        igmp_runtime_on_frame(rt, frame, n, IGMP_LINK_ETHERNET, 1, 1);
+    }
+    expect(igmp_engine_joined_count(rt->eng) == 40, "forty local groups");
+    int seen[40];
+    memset(seen, 0, sizeof seen);
+    igmp_query_out qs[40];
+    for (int pass = 0; pass < 2; pass++) {
+        int ops = igmp_runtime_reconcile(rt);
+        expect(ops == 0, "existing groups are not added again");
+        int qn = 0;
+        igmp_engine_take_queries(rt->eng, qs, &qn, 40);
+        expect(qn == 32, "solicit stops at the pending queue");
+        for (int q = 0; q < qn; q++) {
+            for (int g = 0; g < 40; g++)
+                if (qs[q].group == groups[g])
+                    seen[g] = 1;
+        }
+    }
+    int covered = 0;
+    for (int g = 0; g < 40; g++)
+        covered += seen[g];
+    expect(covered == 40, "later passes reach groups past the queue");
+    free(rt->backend);
+    igmp_runtime_free(rt);
+    free(dir);
+}
+
 static void test_pod_list_without_kind(void) {
     const char *json =
         "{\"kind\":\"PodList\",\"apiVersion\":\"v1\",\"metadata\":{\"resourceVersion\":\"9\"},"
@@ -612,6 +715,8 @@ int main(void) {
     test_snap_clock();
     test_coord_dir_created();
     test_snapshot_field();
+    test_solicit_repairs_local();
+    test_solicit_covers_every_group();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

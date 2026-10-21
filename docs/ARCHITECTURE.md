@@ -34,7 +34,9 @@ Interface disappearance or a name change at the same ifindex retires the old int
 
 Passive mode (the default) never expires a member only because unsolicited reports stopped. Expiry starts after a query is observed. Until then `igmpshark_querier_degraded` is 1 and `/readyz` returns `degraded` with HTTP 200.
 
-`--active-querier` elects the lowest `self-ip`. A query or a fresh snapshot from a DaemonSet with a lower address yields. A higher address does not displace a lower querier that is still inside the other-querier-present interval. Only the elected process queues general queries, last-member queries, and the group-specific solicit sent when a group is created. Solicitation matters because Cilium's datapath will not record a local subscriber until the group exists; the solicit asks the pod to report again so Cilium inserts the local entry. igmpshark does not insert local entries itself.
+`--active-querier` elects the lowest `self-ip`. A query or a fresh snapshot from a DaemonSet with a lower address yields. A higher address does not displace a lower querier that is still inside the other-querier-present interval. Only the elected process queues general queries and last-member queries.
+
+Cilium records a local subscriber only when the group map already exists at the moment the pod's report is snooped. The first report usually arrives before igmpshark's group add. After a group add, and on later reconciles while that pod IP is still missing from the group, igmpshark queues a group-specific query even when it is not the querier. The query is sent after reconcile. Capture interface `any` injects it on each up `lxc*` device and on `cilium_host`, so the pod sees it and the report comes back through Cilium. The query source is this node's address, and a capture of that query does not count as a foreign querier. igmpshark does not insert the pod IP itself: the subscriber-add command would mark it remote. Up to 32 groups are solicited per reconcile, continuing at the next group on the following pass.
 
 ## Queues and limits
 

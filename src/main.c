@@ -442,9 +442,10 @@ static void send_pending_queries(void) {
     igmp_engine_take_queries(rt->eng, qs, &n, 32);
     if (rt->dry_run || no_capture)
         return;
+    uint32_t src = rt->eng->cfg.self_ip ? rt->eng->cfg.self_ip : rt->node_ip;
     for (int i = 0; i < n; i++) {
         const char *ifn = niface ? iface_names[0] : NULL;
-        if (igmp_query_send(ifn, qs[i].group, qs[i].max_resp_ms, qs[i].version) != 0)
+        if (igmp_query_send(ifn, src, qs[i].group, qs[i].max_resp_ms, qs[i].version) != 0)
             log_msg("warn", "query-send-failed");
     }
 }
@@ -657,9 +658,12 @@ int main(int argc, char **argv) {
         igmp_ip_parse(node_ip, &rt->node_ip);
     char cilium_ip[64];
     if (iface_ipv4(cilium_host_iface, cilium_ip, sizeof cilium_ip) == 0 &&
-        igmp_ip_parse(cilium_ip, &rt->node_ip) == 0)
+        igmp_ip_parse(cilium_ip, &rt->node_ip) == 0) {
         ip_source = "cilium_host";
-    else if (strcmp(backend_kind, "cilium") == 0 && cilium_host_iface[0])
+        /* Querier identity and the source of injected queries follow the
+         * same address, so a capture of our own query is not a foreign querier. */
+        rt->eng->cfg.self_ip = rt->node_ip;
+    } else if (strcmp(backend_kind, "cilium") == 0 && cilium_host_iface[0])
         fprintf(stderr,
                 "{\"level\":\"warn\",\"msg\":\"cilium-host-missing\",\"iface\":\"%s\",\"node\":\"%s\"}\n",
                 cilium_host_iface, node);
@@ -835,7 +839,6 @@ int main(int argc, char **argv) {
         igmp_runtime_drain(rt, 64);
         if (!manual_time) {
             igmp_runtime_tick(rt);
-            send_pending_queries();
             if (rt->now_ms >= next_reconcile) {
                 scan_ifaces();
                 if (kube_coord && coord[0]) {
@@ -877,6 +880,10 @@ int main(int argc, char **argv) {
                 igmp_runtime_reconcile(rt);
                 next_reconcile = rt->now_ms + reconcile_ms;
             }
+            /* After reconcile, so a solicit lands once the group map exists.
+             * Cilium records a local subscriber only from a report that
+             * arrives while that map is already there. */
+            send_pending_queries();
         }
     }
 }

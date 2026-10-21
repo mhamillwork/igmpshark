@@ -328,6 +328,10 @@ static void elect_querier(igmp_engine *e, uint32_t ip, int64_t now_ms) {
 }
 
 static void note_querier(igmp_engine *e, uint32_t ip, int64_t now_ms) {
+    /* A query we injected is sourced from self_ip. Treating it as a foreign
+     * querier would start membership expiry on a passive node. */
+    if (ip != 0 && ip == e->cfg.self_ip)
+        return;
     e->queries_seen++;
     elect_querier(e, ip, now_ms);
 }
@@ -521,4 +525,16 @@ void igmp_engine_take_queries(igmp_engine *e, igmp_query_out *out, int *n, int c
         memcpy(out, e->pending_q, (size_t)c * sizeof *out);
     *n = c;
     e->n_pending_q = 0;
+}
+
+int igmp_engine_solicit(igmp_engine *e, uint32_t group, uint32_t ifindex, int version) {
+    if (!e || !e->cfg.solicit_reports || group == 0)
+        return 0;
+    for (int i = 0; i < e->n_pending_q; i++)
+        if (e->pending_q[i].group == group)
+            return 0;
+    if (e->n_pending_q >= (int)(sizeof e->pending_q / sizeof e->pending_q[0]))
+        return -1;
+    queue_query(e, group, ifindex, version >= 3 ? 3 : 2);
+    return 1;
 }

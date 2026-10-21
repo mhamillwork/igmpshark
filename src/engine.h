@@ -108,4 +108,10 @@ int igmp_engine_find(const igmp_engine *e, uint32_t group, uint32_t subscriber,
                      uint32_t ifindex, const igmp_member **out);
 void igmp_engine_take_queries(igmp_engine *e, igmp_query_out *out, int *n, int cap);
 
+/* Queue one group-specific query. Used after the Cilium group map exists so
+ * the pod reports again and the datapath can insert a local subscriber.
+ * Does not require this node to be querier. Returns 1 if queued, 0 if
+ * skipped, -1 if the pending queue is full. */
+int igmp_engine_solicit(igmp_engine *e, uint32_t group, uint32_t ifindex, int version);
+
 #endif

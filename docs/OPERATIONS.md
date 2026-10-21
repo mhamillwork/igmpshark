@@ -61,7 +61,7 @@ tcpdump -i any -n igmp
 
 If tcpdump shows reports and igmpshark does not, check the BPF filter compiled, the interface name, and whether libwireshark rejected the link type (`igmpshark_malformed_total` versus a silent skip). If the reports use a source that is not a pod IP on this node after the first pod list, they are counted in `igmpshark_ignored_unbound_total` on purpose.
 
-If the group is created in Cilium but the pod still receives nothing, the datapath may have handled the report before the group existed. With `--active-querier` the node solicits another report. Without it, the external querier has to ask again, or the application has to retransmit.
+If the group exists in Cilium but the pod address is not a `Local` subscriber, the report was snooped before the group map existed. The next reconciles send a group-specific query toward the pod (`local-solicit` in the log, `igmpshark_queries_sent_total` increasing) until that `Local` row appears. `--active-querier` is not required for this. A node that only has the other node's remote subscriber does not solicit; the node where the pod runs does.
 
 ## Capabilities and mounts
 
