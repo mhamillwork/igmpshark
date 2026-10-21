@@ -1,6 +1,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include "coord.h"
 #include "kube.h"
 #include "query.h"
 #include "runtime.h"
@@ -648,6 +649,9 @@ int main(int argc, char **argv) {
     rt->use_kube = use_kube;
     snprintf(rt->node_name, sizeof rt->node_name, "%s", node);
     snprintf(rt->coord_dir, sizeof rt->coord_dir, "%s", coord);
+    if (coord[0] && igmp_coord_ensure(coord) != 0)
+        fprintf(stderr, "{\"level\":\"warn\",\"msg\":\"coord-dir-create-failed\",\"node\":\"%s\"}\n",
+                node);
     const char *ip_source = "node-ip";
     if (node_ip[0])
         igmp_ip_parse(node_ip, &rt->node_ip);

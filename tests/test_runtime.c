@@ -545,6 +545,26 @@ static void test_snapshot_field(void) {
     free(b64);
 }
 
+static void test_coord_dir_created(void) {
+    char *parent = tmpdir();
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s/coord", parent);
+    igmp_snap_mem mem;
+    memset(&mem, 0, sizeof mem);
+    mem.group = ip4("239.1.1.1");
+    mem.subscriber = ip4("10.1.0.1");
+    mem.joined = 1;
+    expect(igmp_coord_write(dir, "n1", ip4("10.244.0.1"), 0, igmp_coord_now_ms(), &mem, 1) == 0,
+           "snapshot creates the coord directory");
+    igmp_remote_sub remote[4];
+    int nstale = 0;
+    int n = igmp_coord_load_remote(dir, "other", igmp_coord_now_ms(), 600000, remote, 4, NULL, 0,
+                                   &nstale);
+    expect(n == 1 && remote[0].group == mem.group && remote[0].node_ip == ip4("10.244.0.1"),
+           "peer snapshot is visible");
+    free(parent);
+}
+
 static int keep_pod(void *user, const kube_event *ev) {
     kube_event *slot = user;
     if (ev->kind == KUBE_EV_UPSERT && strcmp(ev->name, "repbox-0") == 0)
@@ -590,6 +610,7 @@ int main(void) {
     test_quiet_subscriber_and_queue();
     test_pod_list_without_kind();
     test_snap_clock();
+    test_coord_dir_created();
     test_snapshot_field();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);

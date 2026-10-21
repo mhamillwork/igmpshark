@@ -18,6 +18,14 @@ int64_t igmp_coord_now_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+int igmp_coord_ensure(const char *dir) {
+    if (!dir || !dir[0])
+        return -1;
+    if (mkdir(dir, 0755) == 0 || errno == EEXIST)
+        return 0;
+    return -1;
+}
+
 static int same_name(const char *a, const char *b) {
     return a && b && strcmp(a, b) == 0;
 }
@@ -92,6 +100,8 @@ static int read_file(const char *path, char *buf, size_t cap) {
 int igmp_coord_write(const char *dir, const char *node, uint32_t node_ip, int active,
                      int64_t now_ms, const igmp_snap_mem *members, int nmem) {
     if (!dir || !dir[0] || !node || !node[0])
+        return -1;
+    if (igmp_coord_ensure(dir) != 0)
         return -1;
     char path[768], tmp[800];
     snprintf(path, sizeof path, "%s/%s.snap", dir, node);

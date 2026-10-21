@@ -1,6 +1,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include "coord.h"
 #include "kube.h"
 #include "kube_parse.h"
 
@@ -524,6 +525,8 @@ static int write_one_snapshot(void *user, const char *enc) {
 int kube_fetch_snapshots(const char *dir) {
     kube_client *k = oneshot();
     if (!k || !dir)
+        return -1;
+    if (igmp_coord_ensure(dir) != 0)
         return -1;
     char url[512];
     snprintf(url, sizeof url,

@@ -24,6 +24,8 @@ config:
   immediateLeave: false
   kube: true
   kubeCoord: true
+  # Created by the process under the state volume. Peers publish one file
+  # each; this is how a node's joins become Remote Node subscribers elsewhere.
   coordDir: /var/lib/igmpshark/coord
   statePath: /var/lib/igmpshark/state.tsv
   ledgerPath: /var/lib/igmpshark/ledger.tsv
