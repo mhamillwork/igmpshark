@@ -46,4 +46,9 @@ int igmp_parse_cilium_nodes(const char *text, igmp_cilium_node *out, int cap);
 /* Run `bin node list -o json`. bin NULL uses cilium-dbg. */
 int igmp_cilium_node_list(const char *bin, char *out, size_t outlen, int timeout_ms);
 
+/* command_ok is 1 when cilium-dbg exited 0. An add that reports the key
+ * already exists is the desired state. A delete that reports the key is
+ * already gone is too. Either one must not stall the rest of the plan. */
+int igmp_cilium_result_ok(int op, const char *output, int command_ok);
+
 #endif

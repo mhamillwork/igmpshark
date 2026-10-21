@@ -853,6 +853,158 @@ static void test_pod_list_without_kind(void) {
     expect(ev.ip == ip4("10.42.5.31") && strcmp(ev.node, "ws-g3-281") == 0, "watch pod identity");
 }
 
+static void test_cilium_host_annotation(void) {
+    const char *json =
+        "{\"kind\":\"NodeList\",\"items\":["
+        "{\"metadata\":{\"name\":\"ws-g3-160\",\"labels\":{\"name\":\"not-the-node\"},"
+        "\"annotations\":{"
+        "\"io.cilium.network.ipv4-cilium-host\":\"10.42.7.1\","
+        "\"network.cilium.io/ipv4-health-ip\":\"10.42.7.110\","
+        "\"network.cilium.io/ipv4-cilium-host\":\"10.42.7.178\""
+        "}},\"status\":{\"addresses\":[{\"type\":\"InternalIP\",\"address\":\"192.168.106.218\"}]}},"
+        "{\"metadata\":{\"name\":\"ws-g3-281\",\"annotations\":{"
+        "\"network.cilium.io/ipv4-health-ip\":\"10.42.5.149\","
+        "\"io.cilium.network.ipv4-cilium-host\":\"10.42.5.33\"}}},"
+        "{\"metadata\":{\"name\":\"ws-g3-017\",\"annotations\":{"
+        "\"network.cilium.io/ipv4-health-ip\":\"10.42.1.9\"}}}"
+        "]}";
+    kube_node_ip rows[4];
+    int n = kube_parse_cilium_host_ips(json, rows, 4);
+    expect(n == 2, "health-only node is not a router");
+    expect(strcmp(rows[0].name, "ws-g3-160") == 0, "annotation node name");
+    expect(rows[0].ip == ip4("10.42.7.178"), "canonical annotation beats the alias and the health IP");
+    expect(strcmp(rows[1].name, "ws-g3-281") == 0 && rows[1].ip == ip4("10.42.5.33"),
+           "alias is used when the canonical key is absent");
+    const char *one =
+        "{\"metadata\":{\"name\":\"ws-g3-160\",\"annotations\":{"
+        "\"network.cilium.io/ipv4-cilium-host\":\"10.42.7.178\"}}}";
+    n = kube_parse_cilium_host_ips(one, rows, 4);
+    expect(n == 1 && rows[0].ip == ip4("10.42.7.178"), "a single node object is accepted");
+}
+
+static void test_already_exists_is_success(void) {
+    const char *err =
+        "failed to add subscriber 10.42.7.110 to multicast group 227.188.0.65 "
+        "failed to insert multicast subscriber update key already exists | exit 1";
+    expect(igmp_cilium_result_ok(IGMP_OP_REMOTE_ADD, err, 0) == 1,
+           "duplicate subscriber add is the desired state");
+    expect(igmp_cilium_result_ok(IGMP_OP_GROUP_ADD, "AlreadyExists", 0) == 1,
+           "duplicate group add is success");
+    expect(igmp_cilium_result_ok(IGMP_OP_REMOTE_ADD, "permission denied | exit 1", 0) == 0,
+           "a real add failure is still a failure");
+    expect(igmp_cilium_result_ok(IGMP_OP_REMOTE_ADD, err, 1) == 1, "a zero exit is success");
+    expect(igmp_cilium_result_ok(IGMP_OP_REMOTE_DEL, "key not found | exit 1", 0) == 1,
+           "deleting a missing subscriber is success");
+    expect(igmp_cilium_result_ok(IGMP_OP_GROUP_DEL, "does not exist", 0) == 1,
+           "deleting a missing group is success");
+    expect(igmp_cilium_result_ok(IGMP_OP_REMOTE_DEL, err, 0) == 0,
+           "already exists does not make a delete succeed");
+    expect(igmp_cilium_result_ok(IGMP_OP_REMOTE_ADD, NULL, 0) == 0, "missing output is a failure");
+}
+
+static void test_orphan_remote_without_ledger(void) {
+    char *dir = tmpdir();
+    char state[512];
+    snprintf(state, sizeof state, "%s/map", dir);
+    FILE *fp = fopen(state, "w");
+    fprintf(fp, "227.188.0.65 10.42.7.110 1 0\n");
+    fprintf(fp, "227.188.0.65 0.0.0.0 1 0\n");
+    fprintf(fp, "227.188.0.65 10.42.7.50 0 0\n");
+    fclose(fp);
+    igmp_runtime *rt = make_rt(dir, "ws-g3-017", "10.42.1.1", 0);
+    attach_file(rt, state, 0);
+    rt->mark_from_ledger = 1;
+    snprintf(rt->ledger_path, sizeof rt->ledger_path, "%s/ledger", dir);
+    igmp_runtime_reconcile(rt);
+    expect(has_op(rt, IGMP_OP_REMOTE_DEL, ip4("10.42.7.110")),
+           "remote row is removed after the ledger was wiped");
+    expect(!has_op(rt, IGMP_OP_LOCAL_DEL, ip4("10.42.7.50")),
+           "an unmanaged local row is not claimed");
+    expect(!has_op(rt, IGMP_OP_GROUP_DEL, 0), "unmanaged local blocks group delete");
+
+    fp = fopen(state, "w");
+    fprintf(fp, "227.188.0.65 10.42.7.110 1 0\n");
+    fprintf(fp, "227.188.0.65 0.0.0.0 1 0\n");
+    fclose(fp);
+    igmp_runtime_reconcile(rt);
+    expect(has_op(rt, IGMP_OP_REMOTE_DEL, ip4("10.42.7.110")), "wrong remote is deleted");
+    expect(has_op(rt, IGMP_OP_GROUP_DEL, 0), "group marker does not keep the group");
+
+    fp = fopen(state, "w");
+    fprintf(fp, "227.188.0.65 10.42.7.110 1 0\n");
+    fprintf(fp, "227.188.0.65 0.0.0.0 1 0\n");
+    fclose(fp);
+    igmp_snap_mem mem;
+    memset(&mem, 0, sizeof mem);
+    mem.group = ip4("227.188.0.65");
+    mem.subscriber = ip4("10.42.7.50");
+    mem.joined = 1;
+    expect(igmp_coord_write(dir, "ws-g3-160", ip4("10.42.7.110"), 0, igmp_coord_now_ms(), &mem,
+                            1) == 0,
+           "peer snapshot still publishes the health address");
+    igmp_ip_rewrite rw;
+    memset(&rw, 0, sizeof rw);
+    snprintf(rw.name, sizeof rw.name, "%s", "ws-g3-160");
+    rw.ip = ip4("10.42.7.178");
+    igmp_runtime_set_identities(rt, &rw, 1);
+    igmp_runtime_reconcile(rt);
+    expect(has_op(rt, IGMP_OP_REMOTE_ADD, ip4("10.42.7.178")), "annotation address is installed");
+    expect(has_op(rt, IGMP_OP_REMOTE_DEL, ip4("10.42.7.110")), "health address is removed");
+    expect(!has_op(rt, IGMP_OP_REMOTE_ADD, ip4("10.42.7.110")), "health address is not added");
+    free(rt->backend);
+    igmp_runtime_free(rt);
+    free(dir);
+}
+
+static void test_unsubscribe_drops_stuck_add(void) {
+    char *dir = tmpdir();
+    igmp_snap_mem mem;
+    memset(&mem, 0, sizeof mem);
+    mem.group = ip4("227.188.0.65");
+    mem.subscriber = ip4("10.42.7.50");
+    mem.joined = 1;
+    expect(igmp_coord_write(dir, "ws-g3-160", ip4("10.42.7.110"), 0, igmp_coord_now_ms(), &mem,
+                            1) == 0,
+           "peer joined");
+    igmp_runtime *rt = make_rt(dir, "ws-g3-017", "10.42.1.1", 0);
+    fake_be *f = calloc(1, sizeof *f);
+    f->fail_at = 2;
+    igmp_backend *b = calloc(1, sizeof *b);
+    b->load = fake_load;
+    b->apply = fake_apply;
+    b->user = f;
+    rt->backend = b;
+    expect(igmp_runtime_reconcile(rt) < 0, "subscriber add fails once");
+    expect(has_op(rt, IGMP_OP_REMOTE_ADD, ip4("10.42.7.110")), "failed plan added the snapshot address");
+    char snap[512];
+    snprintf(snap, sizeof snap, "%s/ws-g3-160.snap", dir);
+    expect(unlink(snap) == 0, "peer unsubscribed");
+    igmp_runtime_reconcile(rt);
+    expect(rt->stale_dropped == 1, "retry plan dropped when the remote set changed");
+    expect(!has_op(rt, IGMP_OP_REMOTE_ADD, ip4("10.42.7.110")),
+           "the failed add is not replayed after unsubscribe");
+    expect(has_op(rt, IGMP_OP_GROUP_DEL, 0), "group is deleted on a node with no member");
+
+    expect(igmp_coord_write(dir, "ws-g3-160", ip4("10.42.7.110"), 0, igmp_coord_now_ms(), &mem,
+                            1) == 0,
+           "peer joined again");
+    f->fail_at = f->applies + 1;
+    f->failed = 0;
+    expect(igmp_runtime_reconcile(rt) < 0, "add fails again");
+    igmp_ip_rewrite rw;
+    memset(&rw, 0, sizeof rw);
+    snprintf(rw.name, sizeof rw.name, "%s", "ws-g3-160");
+    rw.ip = ip4("10.42.7.178");
+    igmp_runtime_set_identities(rt, &rw, 1);
+    igmp_runtime_reconcile(rt);
+    expect(has_op(rt, IGMP_OP_REMOTE_ADD, ip4("10.42.7.178")), "identity change installs CiliumInternalIP");
+    expect(!has_op(rt, IGMP_OP_REMOTE_ADD, ip4("10.42.7.110")), "stale add was not replayed");
+    igmp_runtime_free(rt);
+    free(f);
+    free(b);
+    free(dir);
+}
+
 int main(void) {
     test_dry_and_idempotent();
     test_pod_lifecycle();
@@ -872,6 +1024,10 @@ int main(void) {
     test_rewrite_remote_identity();
     test_runtime_uses_identity();
     test_toex_and_trie();
+    test_cilium_host_annotation();
+    test_already_exists_is_success();
+    test_orphan_remote_without_ledger();
+    test_unsubscribe_drops_stuck_add();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

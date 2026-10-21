@@ -664,11 +664,27 @@ static int cli_apply(igmp_backend *b, const igmp_op *op) {
         argv[7] = NULL;
     }
     char buf[1024];
-    if (run_argv(argv, buf, sizeof buf, ctx->timeout_ms) != 0) {
+    int command_ok = run_argv(argv, buf, sizeof buf, ctx->timeout_ms) == 0;
+    if (!igmp_cilium_result_ok(op->op, buf, command_ok)) {
         b->failures++;
         snprintf(b->err, sizeof b->err, "cilium command failed: %.180s", buf);
         return -1;
     }
+    return 0;
+}
+
+int igmp_cilium_result_ok(int op, const char *output, int command_ok) {
+    if (command_ok)
+        return 1;
+    if (!output)
+        return 0;
+    int add = op == IGMP_OP_GROUP_ADD || op == IGMP_OP_REMOTE_ADD;
+    int del = op == IGMP_OP_GROUP_DEL || op == IGMP_OP_REMOTE_DEL || op == IGMP_OP_LOCAL_DEL;
+    if (add && (strstr(output, "already exists") || strstr(output, "AlreadyExists")))
+        return 1;
+    if (del && (strstr(output, "not found") || strstr(output, "does not exist") ||
+                strstr(output, "no such")))
+        return 1;
     return 0;
 }
 

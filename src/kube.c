@@ -384,7 +384,7 @@ static kube_client *oneshot(void) {
 }
 
 static long kube_request(kube_client *k, const char *url, const char *method, const char *payload,
-                         const char *content_type, buf *out) {
+                         const char *content_type, buf *out, long timeout_s) {
     CURL *c = curl_easy_init();
     if (!c)
         return 0;
@@ -394,7 +394,7 @@ static long kube_request(kube_client *k, const char *url, const char *method, co
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, buf_write);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, out);
     curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT, 3L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, timeout_s > 0 ? timeout_s : 3L);
     struct curl_slist *hdr = NULL;
     char auth[8400];
     snprintf(auth, sizeof auth, "Authorization: Bearer %s", k->token);
@@ -451,10 +451,10 @@ int kube_publish_snapshot(const char *node, const char *text) {
              name, b64);
     buf body;
     long code = kube_request(k, item, "PATCH", patch, "Content-Type: application/merge-patch+json",
-                             &body);
+                             &body, 3);
     free(body.data);
     if (code == 404) {
-        code = kube_request(k, coll, "POST", create, "Content-Type: application/json", &body);
+        code = kube_request(k, coll, "POST", create, "Content-Type: application/json", &body, 3);
         free(body.data);
     }
     if (code == 200 || code == 201) {
@@ -465,7 +465,7 @@ int kube_publish_snapshot(const char *node, const char *text) {
     /* PUT without resourceVersion is rejected once the ConfigMap exists, and
      * the previous create reused a destroyed curl handle, so peers never saw
      * a snapshot. Read the version and replace the object. */
-    code = kube_request(k, item, "GET", NULL, NULL, &body);
+    code = kube_request(k, item, "GET", NULL, NULL, &body, 3);
     char rv[80] = "";
     if (code == 200 && body.data) {
         const char *p = strstr(body.data, "\"resourceVersion\"");
@@ -488,7 +488,7 @@ int kube_publish_snapshot(const char *node, const char *text) {
              "\"resourceVersion\":\"%s\",\"labels\":{\"app.kubernetes.io/name\":\"igmpshark\"}},"
              "\"data\":{\"snapshot\":\"%s\"}}",
              name, rv, b64);
-    code = kube_request(k, item, "PUT", create, "Content-Type: application/json", &body);
+    code = kube_request(k, item, "PUT", create, "Content-Type: application/json", &body, 3);
     free(body.data);
     free(patch);
     free(create);
@@ -547,4 +547,25 @@ int kube_fetch_snapshots(const char *dir) {
     }
     free(body.data);
     return w.n;
+}
+
+int kube_load_cilium_host_ips(kube_node_ip *out, int cap) {
+    if (!out || cap <= 0)
+        return -1;
+    kube_client *k = oneshot();
+    if (!k)
+        return -1;
+    char url[512];
+    snprintf(url, sizeof url, "https://%s:%s/api/v1/nodes?limit=500", k->host, k->port);
+    buf body;
+    /* A full node list is larger than a snapshot ConfigMap. Keep the 3s
+     * deadline on publish and fetch; this call can wait longer. */
+    long code = kube_request(k, url, "GET", NULL, NULL, &body, 10);
+    if (code != 200 || !body.data) {
+        free(body.data);
+        return -1;
+    }
+    int n = kube_parse_cilium_host_ips(body.data, out, cap);
+    free(body.data);
+    return n;
 }

@@ -36,6 +36,7 @@ typedef struct igmp_rt_extra {
     igmp_local_join joins[32];
     igmp_ip_rewrite ids[128];
     int nids;
+    uint64_t remote_sig;
     igmp_iface ifaces[64];
 } igmp_rt_extra;
 
@@ -45,16 +46,26 @@ static igmp_rt_extra *extra(igmp_runtime *rt) {
 
 void igmp_runtime_set_identities(igmp_runtime *rt, const igmp_ip_rewrite *rows, int n) {
     igmp_rt_extra *x = extra(rt);
-    x->nids = 0;
-    if (!rows || n <= 0)
-        return;
-    if (n > 128)
-        n = 128;
-    for (int i = 0; i < n; i++) {
-        if (!rows[i].name[0] || rows[i].ip == 0)
-            continue;
-        x->ids[x->nids++] = rows[i];
+    igmp_ip_rewrite next[128];
+    int nn = 0;
+    if (rows && n > 0) {
+        if (n > 128)
+            n = 128;
+        for (int i = 0; i < n; i++) {
+            if (!rows[i].name[0] || rows[i].ip == 0)
+                continue;
+            next[nn++] = rows[i];
+        }
     }
+    int changed = nn != x->nids;
+    for (int i = 0; !changed && i < nn; i++)
+        if (strcmp(next[i].name, x->ids[i].name) != 0 || next[i].ip != x->ids[i].ip)
+            changed = 1;
+    if (changed)
+        x->n_retry = 0;
+    x->nids = nn;
+    if (nn > 0)
+        memcpy(x->ids, next, (size_t)nn * sizeof *next);
 }
 
 int igmp_runtime_take_joins(igmp_runtime *rt, igmp_local_join *out, int cap) {
@@ -426,6 +437,12 @@ static void apply_ledger_marks(igmp_runtime *rt, igmp_actual *rows, int n) {
             rows[i].managed = 1;
         if (!rows[i].remote && igmp_engine_find(rt->eng, rows[i].group, rows[i].addr, 0, NULL))
             rows[i].managed = 1;
+        /* The datapath never inserts a remote row. subscriber add is the only
+         * writer, and a pod restart drops the emptyDir ledger, so an address
+         * left from the previous process has to stay owned or it can never
+         * be removed and it blocks group delete. */
+        if (rows[i].remote && rows[i].addr != 0)
+            rows[i].managed = 1;
     }
 }
 
@@ -582,6 +599,7 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
     }
     int continue_plan = x->n_retry > 0 && x->retry_gen == rt->gen;
     int nactual = 0;
+    int loaded = 0;
     if (!continue_plan) {
         nactual = rt->backend->load(rt->backend, actual, 4096);
         if (nactual < 0) {
@@ -594,6 +612,7 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
             return -1;
         }
         apply_ledger_marks(rt, actual, nactual);
+        loaded = 1;
     }
     int nlocal = fill_local(rt, local, 4096);
     int nremote = 0;
@@ -617,6 +636,34 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
                     nremote, rt->node_name);
         }
         rt->remote_subscribers = nremote;
+    }
+    uint64_t remote_sig = (uint64_t)nremote << 32;
+    for (int i = 0; i < nremote; i++) {
+        uint64_t h = remote[i].group;
+        h = h * 131u + remote[i].node_ip;
+        h = h * 131u + (uint64_t)remote[i].joined_count;
+        remote_sig ^= h;
+    }
+    /* A leave on another node does not bump the local generation. Finishing
+     * an old add plan would reinstall groups the peer has already dropped. */
+    if (continue_plan && remote_sig != x->remote_sig) {
+        continue_plan = 0;
+        x->n_retry = 0;
+        rt->stale_dropped++;
+    }
+    x->remote_sig = remote_sig;
+    if (!continue_plan && !loaded) {
+        nactual = rt->backend->load(rt->backend, actual, 4096);
+        if (nactual < 0) {
+            rt->reconcile_failures++;
+            log_backend(rt, "backend-load-failed");
+            free(actual);
+            free(local);
+            free(remote);
+            free(ops);
+            return -1;
+        }
+        apply_ledger_marks(rt, actual, nactual);
     }
     int allow_delete = rt->now_ms >= rt->eng->started_ms + rt->eng->cfg.startup_grace_ms;
     if (rt->use_kube && !rt->pods.full_list_ok)

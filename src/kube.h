@@ -36,4 +36,16 @@ int kube_fetch_snapshots(const char *dir);
 /* HTTP status from the last publish or fetch. 0 when the call did not run. */
 long kube_last_status(void);
 
+/* Kubernetes node metadata.name and the Cilium router annotation
+ * network.cilium.io/ipv4-cilium-host. That address is CiliumInternalIP. */
+typedef struct kube_node_ip {
+    char name[64];
+    uint32_t ip;
+} kube_node_ip;
+
+/* GET /api/v1/nodes and parse the router annotation. Returns the number of
+ * nodes that have one, or -1 when the apiserver cannot be read. Does not
+ * use the health annotation. */
+int kube_load_cilium_host_ips(kube_node_ip *out, int cap);
+
 #endif

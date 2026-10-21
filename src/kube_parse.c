@@ -243,3 +243,108 @@ int kube_each_snapshot(const char *json, int (*cb)(void *user, const char *b64),
     free(enc);
     return n;
 }
+
+static int string_after_key(const char *keyat, const char *end, char *out, size_t cap) {
+    const char *p = strchr(keyat, ':');
+    if (!p || p >= end)
+        return -1;
+    p++;
+    return parse_string(&p, end, out, cap);
+}
+
+static const char *object_after_key(const char *start, const char *end, const char *key) {
+    const char *k = find_key(start, end, key);
+    if (!k)
+        return NULL;
+    const char *p = strchr(k, ':');
+    if (!p || p >= end)
+        return NULL;
+    p = skip_ws(p + 1, end);
+    if (p >= end || *p != '{')
+        return NULL;
+    return p;
+}
+
+static int ip_after_key(const char *start, const char *end, const char *key, uint32_t *ip) {
+    const char *k = find_key(start, end, key);
+    if (!k)
+        return -1;
+    char text[64];
+    if (string_after_key(k, end, text, sizeof text) != 0)
+        return -1;
+    if (igmp_ip_parse(text, ip) != 0 || *ip == 0)
+        return -1;
+    return 0;
+}
+
+/* metadata.name plus the router annotation. The health annotation is a
+ * different key and is never copied into ip. */
+static int fill_cilium_host(const char *obj, const char *end, kube_node_ip *out) {
+    memset(out, 0, sizeof *out);
+    const char *meta = object_after_key(obj, end, "\"metadata\"");
+    if (!meta)
+        return -1;
+    const char *meta_end = end_object(meta, end);
+    if (!meta_end)
+        return -1;
+    const char *ann = object_after_key(meta, meta_end, "\"annotations\"");
+    if (!ann)
+        return -1;
+    /* metadata.name is before annotations. Do not take a "name" key that
+     * lives inside the annotation map. */
+    const char *name = find_key(meta, ann, "\"name\"");
+    if (!name)
+        name = find_key(meta, meta_end, "\"name\"");
+    if (!name || string_after_key(name, meta_end, out->name, sizeof out->name) != 0 || !out->name[0])
+        return -1;
+    const char *ann_end = end_object(ann, meta_end);
+    if (!ann_end)
+        return -1;
+    if (ip_after_key(ann, ann_end, "\"network.cilium.io/ipv4-cilium-host\"", &out->ip) != 0)
+        ip_after_key(ann, ann_end, "\"io.cilium.network.ipv4-cilium-host\"", &out->ip);
+    if (out->ip == 0)
+        return -1;
+    return 0;
+}
+
+int kube_parse_cilium_host_ips(const char *json, kube_node_ip *out, int cap) {
+    if (!json || !out || cap <= 0)
+        return -1;
+    const char *limit = json + strlen(json);
+    const char *items = strstr(json, "\"items\"");
+    const char *p = json;
+    if (items) {
+        const char *br = strchr(items, '[');
+        if (!br)
+            return 0;
+        p = br + 1;
+    }
+    int n = 0;
+    for (;;) {
+        p = skip_ws(p, limit);
+        if (p >= limit || *p == ']' || *p == '\0')
+            break;
+        if (*p == ',') {
+            p++;
+            continue;
+        }
+        if (*p != '{')
+            break;
+        const char *obj_end = end_object(p, limit);
+        if (!obj_end)
+            break;
+        kube_node_ip row;
+        if (n < cap && fill_cilium_host(p, obj_end, &row) == 0) {
+            int dup = 0;
+            for (int i = 0; i < n; i++)
+                if (strcmp(out[i].name, row.name) == 0)
+                    dup = 1;
+            if (!dup)
+                out[n++] = row;
+        }
+        p = obj_end;
+        if (!items)
+            break;
+    }
+    return n;
+}

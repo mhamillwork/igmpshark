@@ -61,7 +61,9 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
             # Kubernetes node InternalIP. Logged as host-ip. It is not the
-            # remote subscriber. CiliumInternalIP comes from cilium-dbg node list.
+            # remote subscriber. CiliumInternalIP is the node annotation
+            # network.cilium.io/ipv4-cilium-host, with cilium-dbg node list
+            # as the fallback.
             - name: NODE_IP
               valueFrom:
                 fieldRef:

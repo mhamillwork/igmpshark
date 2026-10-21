@@ -52,6 +52,7 @@ static char cilium_bin[256] = "cilium-dbg";
 static uint32_t host_ip_cfg;
 static uint32_t cilium_host_addr;
 static int identity_ok = -1;
+static int identity_disagree_logged;
 static uint32_t identity_logged;
 static kube_client *kube;
 static int kube_coord;
@@ -451,35 +452,107 @@ static int cilium_name_is(const char *listed, const char *want) {
     return ll > wl && listed[ll - wl - 1] == '/' && strcmp(listed + (ll - wl), want) == 0;
 }
 
-/* CiliumInternalIP comes from `cilium-dbg node list`, not from status.hostIP
- * and not from the first address on cilium_host. A failed list leaves the
- * last good identity in place and does not publish the Kubernetes node IP. */
+static int same_node(const char *a, const char *b) {
+    return cilium_name_is(a, b) || cilium_name_is(b, a);
+}
+
+static uint32_t annotated_ip(const kube_node_ip *ann, int nann, const char *name) {
+    for (int i = 0; i < nann; i++) {
+        if (!ann[i].name[0] || ann[i].ip == 0)
+            continue;
+        if (same_node(ann[i].name, name))
+            return ann[i].ip;
+    }
+    return 0;
+}
+
+static int rewrite_has(const igmp_ip_rewrite *rw, int n, const char *name) {
+    for (int i = 0; i < n; i++)
+        if (same_node(rw[i].name, name))
+            return 1;
+    return 0;
+}
+
+/* CiliumInternalIP is the node annotation network.cilium.io/ipv4-cilium-host.
+ * `cilium-dbg node list` is only the fallback: its secondary list has no
+ * address type, so the first in-CIDR address can be the health endpoint.
+ * Neither source is status.hostIP or the first address on cilium_host. A
+ * failed lookup leaves the last good identity in place. */
 static int refresh_cilium_identity(void) {
+    kube_node_ip ann[128];
+    int ann_rc = kube_load_cilium_host_ips(ann, 128);
+    int nann = ann_rc < 0 ? 0 : ann_rc;
     char *buf = malloc(1 << 20);
-    if (!buf)
-        return -1;
-    if (igmp_cilium_node_list(cilium_bin, buf, 1 << 20, 3000) != 0) {
-        free(buf);
+    igmp_cilium_node nodes[128];
+    int nnodes = 0;
+    int list_ok = 0;
+    if (buf && igmp_cilium_node_list(cilium_bin, buf, 1 << 20, 3000) == 0) {
+        nnodes = igmp_parse_cilium_nodes(buf, nodes, 128);
+        if (nnodes < 0)
+            nnodes = 0;
+        list_ok = 1;
+    }
+    free(buf);
+    /* A blip must not replace the annotation address with the node-list
+     * fallback. That fallback is what installed the health IP. */
+    if (ann_rc < 0 && identity_ok == 1)
+        return 0;
+    if (!list_ok && nann == 0) {
         if (identity_ok != 0) {
             identity_ok = 0;
             log_msg("warn", "cilium-identity-failed");
         }
         return -1;
     }
-    igmp_cilium_node nodes[128];
-    int n = igmp_parse_cilium_nodes(buf, nodes, 128);
-    free(buf);
     igmp_ip_rewrite rw[128];
     int nr = 0;
     uint32_t self = 0;
-    for (int i = 0; i < n && nr < 128; i++) {
-        if (!nodes[i].name[0] || nodes[i].internal == 0)
+    int self_from_ann = 0;
+    uint32_t self_list = 0;
+    for (int i = 0; i < nnodes && nr < 128; i++) {
+        if (!nodes[i].name[0])
+            continue;
+        uint32_t from_ann = annotated_ip(ann, nann, nodes[i].name);
+        uint32_t ip = from_ann ? from_ann : nodes[i].internal;
+        if (!ip)
             continue;
         snprintf(rw[nr].name, sizeof rw[nr].name, "%s", nodes[i].name);
-        rw[nr].ip = nodes[i].internal;
-        if (cilium_name_is(nodes[i].name, rt->node_name))
-            self = nodes[i].internal;
+        rw[nr].ip = ip;
+        if (same_node(nodes[i].name, rt->node_name)) {
+            self = ip;
+            self_from_ann = from_ann != 0;
+            self_list = nodes[i].internal;
+        }
         nr++;
+    }
+    for (int i = 0; i < nann && nr < 128; i++) {
+        if (!ann[i].name[0] || ann[i].ip == 0)
+            continue;
+        if (rewrite_has(rw, nr, ann[i].name))
+            continue;
+        snprintf(rw[nr].name, sizeof rw[nr].name, "%s", ann[i].name);
+        rw[nr].ip = ann[i].ip;
+        if (same_node(ann[i].name, rt->node_name)) {
+            self = ann[i].ip;
+            self_from_ann = 1;
+        }
+        nr++;
+    }
+    if (nann > 0 && !identity_disagree_logged) {
+        for (int i = 0; i < nnodes; i++) {
+            uint32_t from_ann = annotated_ip(ann, nann, nodes[i].name);
+            if (!from_ann || !nodes[i].internal || from_ann == nodes[i].internal)
+                continue;
+            char a[32], b[32];
+            igmp_ip_fmt(from_ann, a, sizeof a);
+            igmp_ip_fmt(nodes[i].internal, b, sizeof b);
+            fprintf(stderr,
+                    "{\"level\":\"warn\",\"msg\":\"cilium-identity-disagree\","
+                    "\"annotation\":\"%s\",\"node-list\":\"%s\",\"name\":\"%s\","
+                    "\"node\":\"%s\"}\n",
+                    a, b, nodes[i].name, rt->node_name);
+        }
+        identity_disagree_logged = 1;
     }
     if (nr == 0) {
         if (identity_ok != 0) {
@@ -501,15 +574,24 @@ static int refresh_cilium_identity(void) {
     if (identity_ok != 1 || identity_logged != self) {
         identity_ok = 1;
         identity_logged = self;
-        char ip[32], host[32], face[32];
+        char ip[32], host[32], face[32], listed[32];
         igmp_ip_fmt(self, ip, sizeof ip);
         igmp_ip_fmt(host_ip_cfg, host, sizeof host);
         igmp_ip_fmt(cilium_host_addr, face, sizeof face);
-        fprintf(stderr,
-                "{\"level\":\"info\",\"msg\":\"node-ip\",\"ip\":\"%s\","
-                "\"source\":\"cilium-internal\",\"host-ip\":\"%s\","
-                "\"cilium-host-ip\":\"%s\",\"node\":\"%s\"}\n",
-                ip, host, face, rt->node_name);
+        igmp_ip_fmt(self_list, listed, sizeof listed);
+        const char *source = self_from_ann ? "annotation" : "cilium-internal";
+        if (self_list && self_list != self)
+            fprintf(stderr,
+                    "{\"level\":\"info\",\"msg\":\"node-ip\",\"ip\":\"%s\","
+                    "\"source\":\"%s\",\"node-list-ip\":\"%s\",\"host-ip\":\"%s\","
+                    "\"cilium-host-ip\":\"%s\",\"node\":\"%s\"}\n",
+                    ip, source, listed, host, face, rt->node_name);
+        else
+            fprintf(stderr,
+                    "{\"level\":\"info\",\"msg\":\"node-ip\",\"ip\":\"%s\","
+                    "\"source\":\"%s\",\"host-ip\":\"%s\","
+                    "\"cilium-host-ip\":\"%s\",\"node\":\"%s\"}\n",
+                    ip, source, host, face, rt->node_name);
     }
     return 0;
 }

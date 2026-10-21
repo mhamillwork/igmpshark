@@ -54,6 +54,10 @@ static int group_blocked(const igmp_actual *actual, int n, uint32_t group,
     for (int i = 0; i < n; i++) {
         if (actual[i].group != group)
             continue;
+        /* A group-list marker has no subscriber. It must not keep the group
+         * alive after every real subscriber is gone. */
+        if (actual[i].addr == 0)
+            continue;
         if (!actual[i].managed)
             return 1;
         if (actual[i].remote && actual[i].addr != 0 &&
