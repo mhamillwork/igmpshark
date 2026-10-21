@@ -559,7 +559,7 @@ static void test_coord_dir_created(void) {
     igmp_remote_sub remote[4];
     int nstale = 0;
     int n = igmp_coord_load_remote(dir, "other", igmp_coord_now_ms(), 600000, remote, 4, NULL, 0,
-                                   &nstale);
+                                   &nstale, NULL, 0);
     expect(n == 1 && remote[0].group == mem.group && remote[0].node_ip == ip4("10.244.0.1"),
            "peer snapshot is visible");
     free(parent);
@@ -593,6 +593,10 @@ static void test_solicit_repairs_local(void) {
     expect(rt->eng->queries_sent == 0, "report alone does not solicit");
     int ops = igmp_runtime_reconcile(rt);
     expect(ops >= 1 && has_op(rt, IGMP_OP_GROUP_ADD, 0), "group is added");
+    igmp_local_join joins[4];
+    int jn = igmp_runtime_take_joins(rt, joins, 4);
+    expect(jn == 1 && joins[0].group == g && joins[0].subscriber == sub,
+           "missing local endpoint queues a TO_EX join");
     igmp_query_out qs[40];
     int qn = 0;
     igmp_engine_take_queries(rt->eng, qs, &qn, 40);
@@ -606,6 +610,8 @@ static void test_solicit_repairs_local(void) {
     int steady = igmp_runtime_reconcile(rt);
     igmp_engine_take_queries(rt->eng, qs, &qn, 40);
     expect(steady == 0 && qn == 0, "local endpoint present stops the solicit");
+    jn = igmp_runtime_take_joins(rt, joins, 4);
+    expect(jn == 0, "local endpoint present stops the join");
 
     igmp_runtime *dry = make_rt(dir, "n1", "10.244.0.1", 0);
     dry->eng->cfg.solicit_reports = 1;
@@ -620,6 +626,8 @@ static void test_solicit_repairs_local(void) {
     igmp_runtime_reconcile(dry);
     igmp_engine_take_queries(dry->eng, qs, &qn, 40);
     expect(qn == 0 && dry->eng->queries_sent == 0, "dry-run does not solicit");
+    jn = igmp_runtime_take_joins(dry, joins, 4);
+    expect(jn == 0, "dry-run does not inject a join");
     free(rt->backend);
     free(dry->backend);
     igmp_runtime_free(rt);
@@ -675,6 +683,149 @@ static void test_solicit_covers_every_group(void) {
     free(dir);
 }
 
+static void test_cilium_internal_identity(void) {
+    const char *json =
+        "["
+        "{\"health-endpoint-address\":{\"ipv4\":{\"enabled\":true,\"ip\":\"10.42.5.149\"}},"
+        "\"ingress-address\":{\"ipv4\":{\"ip\":\"10.42.5.200\"}},"
+        "\"name\":\"ws-g3-281\","
+        "\"primary-address\":{\"ipv4\":{\"alloc-range\":\"10.42.5.0/24\",\"enabled\":true,"
+        "\"ip\":\"192.168.106.135\"}},"
+        "\"secondary-addresses\":[{\"ip\":\"10.42.5.149\"},{\"ip\":\"192.168.106.135\"},"
+        "{\"ip\":\"10.42.5.33\"}],"
+        "\"source\":\"local\"},"
+        "{\"health-endpoint-address\":{\"ipv4\":{\"ip\":\"10.42.7.110\"}},"
+        "\"name\":\"default/ws-g3-160\","
+        "\"primary-address\":{\"ipv4\":{\"alloc-range\":\"10.42.7.0/24\","
+        "\"ip\":\"192.168.106.218\"}},"
+        "\"secondary-addresses\":[{\"ip\":\"10.42.7.178\"}]}"
+        "]";
+    igmp_cilium_node nodes[4];
+    int n = igmp_parse_cilium_nodes(json, nodes, 4);
+    expect(n == 2, "both nodes are parsed from an array");
+    expect(strcmp(nodes[0].name, "ws-g3-281") == 0, "first node name");
+    expect(nodes[0].primary == ip4("192.168.106.135"), "kubernetes node IP stays primary");
+    expect(nodes[0].health == ip4("10.42.5.149"), "health address is recorded separately");
+    expect(nodes[0].internal == ip4("10.42.5.33"), "in-cidr secondary is CiliumInternalIP");
+    expect(nodes[1].internal == ip4("10.42.7.178"), "second node internal IP");
+    expect(nodes[1].health == ip4("10.42.7.110"), "second health address");
+    expect(nodes[1].primary == ip4("192.168.106.218"), "second kubernetes node IP");
+
+    const char *wrapped =
+        "{\"nodes-added\":[{\"name\":\"n1\",\"primary-address\":{\"ipv4\":{\"ip\":\"192.168.1.1\"}},"
+        "\"secondary-addresses\":[{\"ip\":\"10.1.0.9\"}]}]}";
+    n = igmp_parse_cilium_nodes(wrapped, nodes, 4);
+    expect(n == 1 && nodes[0].internal == ip4("10.1.0.9") && nodes[0].primary == ip4("192.168.1.1"),
+           "nodes-added wrapper without a pod CIDR still skips the primary");
+
+    const char *only_primary =
+        "[{\"name\":\"n2\",\"primary-address\":{\"ipv4\":{\"alloc-range\":\"10.42.5.0/24\","
+        "\"ip\":\"192.168.106.135\"}},\"secondary-addresses\":[{\"ip\":\"192.168.106.135\"}]}]";
+    n = igmp_parse_cilium_nodes(only_primary, nodes, 4);
+    expect(n == 1 && nodes[0].internal == 0, "primary is never used as the overlay address");
+}
+
+static void test_rewrite_remote_identity(void) {
+    char *dir = tmpdir();
+    igmp_snap_mem mem;
+    memset(&mem, 0, sizeof mem);
+    mem.group = ip4("227.188.50.50");
+    mem.subscriber = ip4("10.42.7.50");
+    mem.joined = 1;
+    expect(igmp_coord_write(dir, "ws-g3-160", ip4("10.42.7.110"), 0, igmp_coord_now_ms(), &mem,
+                            1) == 0,
+           "peer snapshot published the health address");
+    igmp_remote_sub remote[4];
+    int nstale = 0;
+    igmp_ip_rewrite rw;
+    memset(&rw, 0, sizeof rw);
+    snprintf(rw.name, sizeof rw.name, "%s", "default/ws-g3-160");
+    rw.ip = ip4("10.42.7.178");
+    int n = igmp_coord_load_remote(dir, "ws-g3-281", igmp_coord_now_ms(), 600000, remote, 4, NULL,
+                                   0, &nstale, &rw, 1);
+    expect(n == 1 && remote[0].node_ip == ip4("10.42.7.178") && remote[0].group == mem.group,
+           "peer address is rewritten to CiliumInternalIP");
+    igmp_ip_rewrite other;
+    memset(&other, 0, sizeof other);
+    snprintf(other.name, sizeof other.name, "%s", "somewhere-else");
+    other.ip = ip4("10.9.9.9");
+    n = igmp_coord_load_remote(dir, "ws-g3-281", igmp_coord_now_ms(), 600000, remote, 4, NULL, 0,
+                               &nstale, &other, 1);
+    expect(n == 0, "unknown peer is not installed from the snapshot address");
+    free(dir);
+}
+
+static void test_runtime_uses_identity(void) {
+    char *dir = tmpdir();
+    igmp_snap_mem mem;
+    memset(&mem, 0, sizeof mem);
+    mem.group = ip4("227.188.50.50");
+    mem.subscriber = ip4("10.42.5.31");
+    mem.joined = 1;
+    expect(igmp_coord_write(dir, "ws-g3-281", ip4("10.42.5.149"), 0, igmp_coord_now_ms(), &mem,
+                            1) == 0,
+           "snapshot still carries the address tcpdump showed");
+    char state[512];
+    snprintf(state, sizeof state, "%s/state", dir);
+    FILE *fp = fopen(state, "w");
+    expect(fp != NULL, "empty cilium state");
+    if (fp)
+        fclose(fp);
+    igmp_runtime *rt = make_rt(dir, "ws-g3-160", "10.42.7.178", 0);
+    attach_file(rt, state, 0);
+    igmp_ip_rewrite rw;
+    memset(&rw, 0, sizeof rw);
+    snprintf(rw.name, sizeof rw.name, "%s", "ws-g3-281");
+    rw.ip = ip4("10.42.5.33");
+    igmp_runtime_set_identities(rt, &rw, 1);
+    igmp_runtime_reconcile(rt);
+    expect(has_op(rt, IGMP_OP_REMOTE_ADD, ip4("10.42.5.33")), "remote subscriber is CiliumInternalIP");
+    expect(!has_op(rt, IGMP_OP_REMOTE_ADD, ip4("10.42.5.149")), "health address is not a subscriber");
+    free(rt->backend);
+    igmp_runtime_free(rt);
+    free(dir);
+}
+
+static void test_toex_and_trie(void) {
+    uint8_t pkt[16];
+    uint32_t g = ip4("227.188.0.65");
+    expect(igmp_v3_toex_build(pkt, sizeof pkt, g) == 16, "to_ex report is 16 bytes");
+    expect(pkt[0] == 0x22 && pkt[7] == 1 && pkt[8] == IGMP_REC_TO_EXCLUDE, "to_ex record type");
+    expect(pkt[11] == 0, "to_ex has no sources");
+    uint32_t got = ((uint32_t)pkt[12] << 24) | ((uint32_t)pkt[13] << 16) | ((uint32_t)pkt[14] << 8) |
+                   pkt[15];
+    expect(got == g, "to_ex group address");
+    uint8_t check[16];
+    memcpy(check, pkt, 16);
+    check[2] = check[3] = 0;
+    uint16_t sum = igmp_checksum(check, 16);
+    expect(pkt[2] == (uint8_t)(sum >> 8) && pkt[3] == (uint8_t)sum, "to_ex checksum");
+
+    const char *pod =
+        "Main:\n"
+        "  +-- 0.0.0.0/0 3 0 5\n"
+        "     +-- 10.42.7.0/24 2 0 1\n"
+        "        |-- 10.42.7.50\n"
+        "           /32 host UNICAST\n"
+        "Local:\n"
+        "  +-- 10.42.7.50/32 0 0 1\n"
+        "     |-- 10.42.7.50\n"
+        "        /32 host LOCAL\n";
+    expect(igmp_fib_trie_has_local(pod, ip4("10.42.7.50")) == 1, "pod Local section matches");
+    const char *host =
+        "Main:\n"
+        "  +-- 10.42.7.50/32 1 0 1\n"
+        "     |-- 10.42.7.50\n"
+        "        /32 host UNICAST\n"
+        "Local:\n"
+        "  +-- 10.42.7.178/32 0 0 1\n"
+        "     |-- 10.42.7.178\n"
+        "        /32 host LOCAL\n";
+    expect(igmp_fib_trie_has_local(host, ip4("10.42.7.50")) == 0,
+           "host route is not a local address");
+    expect(igmp_fib_trie_has_local(host, ip4("10.42.7.178")) == 1, "host's own local address matches");
+}
+
 static void test_pod_list_without_kind(void) {
     const char *json =
         "{\"kind\":\"PodList\",\"apiVersion\":\"v1\",\"metadata\":{\"resourceVersion\":\"9\"},"
@@ -717,6 +868,10 @@ int main(void) {
     test_snapshot_field();
     test_solicit_repairs_local();
     test_solicit_covers_every_group();
+    test_cilium_internal_identity();
+    test_rewrite_remote_identity();
+    test_runtime_uses_identity();
+    test_toex_and_trie();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

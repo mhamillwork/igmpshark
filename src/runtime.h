@@ -2,8 +2,14 @@
 #define IGMPSHARK_RUNTIME_H
 
 #include "backend.h"
+#include "coord.h"
 #include "engine.h"
 #include "pods.h"
+
+typedef struct igmp_local_join {
+    uint32_t group;
+    uint32_t subscriber;
+} igmp_local_join;
 
 #define IGMP_FRAME_MAX 2048
 
@@ -55,6 +61,14 @@ int igmp_runtime_drain(igmp_runtime *rt, int maxn);
 void igmp_runtime_tick(igmp_runtime *rt);
 int igmp_runtime_reconcile(igmp_runtime *rt);
 int igmp_runtime_write_snapshot(igmp_runtime *rt);
+
+/* Overlay addresses used instead of the IP written in a peer snapshot.
+ * Entries with a zero IP are ignored. */
+void igmp_runtime_set_identities(igmp_runtime *rt, const igmp_ip_rewrite *rows, int n);
+
+/* Joins queued so a pod can be recorded as a local subscriber. Clears the
+ * queue. Returns the number copied. */
+int igmp_runtime_take_joins(igmp_runtime *rt, igmp_local_join *out, int cap);
 int igmp_runtime_restore(igmp_runtime *rt);
 
 int igmp_runtime_pod_upsert(igmp_runtime *rt, const char *uid, const char *name,

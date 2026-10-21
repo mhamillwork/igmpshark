@@ -274,6 +274,298 @@ int igmp_parse_cilium_subscribers(const char *text, igmp_actual *rows, int cap) 
     return n;
 }
 
+static const char *json_ws(const char *p, const char *end) {
+    while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t'))
+        p++;
+    return p;
+}
+
+static const char *json_string(const char *p, const char *end, char *out, size_t cap) {
+    if (out && cap)
+        out[0] = 0;
+    if (p >= end || *p != '"')
+        return p;
+    p++;
+    size_t n = 0;
+    while (p < end && *p != '"') {
+        if (*p == '\\' && p + 1 < end)
+            p++;
+        if (out && n + 1 < cap)
+            out[n++] = *p;
+        p++;
+    }
+    if (out && cap)
+        out[n < cap ? n : cap - 1] = 0;
+    if (p < end && *p == '"')
+        p++;
+    return p;
+}
+
+static const char *json_skip(const char *p, const char *end) {
+    p = json_ws(p, end);
+    if (p >= end)
+        return p;
+    if (*p == '"')
+        return json_string(p, end, NULL, 0);
+    if (*p == '{' || *p == '[') {
+        int depth = 0;
+        int in_str = 0;
+        while (p < end) {
+            if (in_str) {
+                if (*p == '\\' && p + 1 < end) {
+                    p += 2;
+                    continue;
+                }
+                if (*p == '"')
+                    in_str = 0;
+                p++;
+                continue;
+            }
+            if (*p == '"') {
+                in_str = 1;
+                p++;
+                continue;
+            }
+            if (*p == '{' || *p == '[')
+                depth++;
+            else if (*p == '}' || *p == ']') {
+                depth--;
+                p++;
+                if (depth == 0)
+                    return p;
+                continue;
+            }
+            p++;
+        }
+        return p;
+    }
+    while (p < end && *p != ',' && *p != '}' && *p != ']')
+        p++;
+    return p;
+}
+
+/* Value of a direct key of the object that starts at `obj`. */
+static const char *json_key(const char *obj, const char *end, const char *want, const char **vend) {
+    if (!obj || obj >= end || *obj != '{')
+        return NULL;
+    const char *p = obj + 1;
+    while (p < end) {
+        p = json_ws(p, end);
+        if (p >= end || *p == '}')
+            return NULL;
+        if (*p == ',') {
+            p++;
+            continue;
+        }
+        if (*p != '"')
+            return NULL;
+        char key[64];
+        p = json_string(p, end, key, sizeof key);
+        p = json_ws(p, end);
+        if (p < end && *p == ':')
+            p++;
+        p = json_ws(p, end);
+        const char *v = p;
+        const char *ve = json_skip(p, end);
+        if (strcmp(key, want) == 0) {
+            if (vend)
+                *vend = ve;
+            return v;
+        }
+        p = ve;
+    }
+    return NULL;
+}
+
+static int cidr_has(uint32_t ip, uint32_t base, int prefix) {
+    if (prefix >= 32)
+        return ip == base;
+    if (prefix <= 0)
+        return 1;
+    uint32_t mask = 0xffffffffu << (32 - prefix);
+    return (ip & mask) == (base & mask);
+}
+
+static void addressing_ipv4(const char *obj, const char *end, uint32_t *ip, uint32_t *base,
+                            int *prefix) {
+    const char *ve = NULL;
+    const char *v4 = json_key(obj, end, "ipv4", &ve);
+    if (!v4 || v4 >= end || *v4 != '{')
+        return;
+    const char *ie = NULL;
+    const char *is = json_key(v4, ve, "ip", &ie);
+    if (is && ip) {
+        char s[64];
+        json_string(is, ie ? ie : ve, s, sizeof s);
+        uint32_t v = 0;
+        if (igmp_ip_parse(s, &v) == 0)
+            *ip = v;
+    }
+    if (!base || !prefix)
+        return;
+    const char *ce = NULL;
+    const char *cs = json_key(v4, ve, "alloc-range", &ce);
+    if (!cs)
+        return;
+    char s[64];
+    json_string(cs, ce ? ce : ve, s, sizeof s);
+    char *slash = strchr(s, '/');
+    if (!slash)
+        return;
+    *slash = 0;
+    uint32_t b = 0;
+    int pre = atoi(slash + 1);
+    if (igmp_ip_parse(s, &b) == 0 && pre >= 0 && pre <= 32) {
+        *base = b;
+        *prefix = pre;
+    }
+}
+
+static const char *enclosing_object(const char *begin, const char *pos) {
+    int depth = 0;
+    const char *p = pos;
+    while (p > begin) {
+        p--;
+        if (*p == '"') {
+            const char *q = p;
+            while (q > begin) {
+                q--;
+                if (*q != '"')
+                    continue;
+                int bs = 0;
+                const char *b = q;
+                while (b > begin && b[-1] == '\\') {
+                    bs++;
+                    b--;
+                }
+                if ((bs % 2) == 0) {
+                    p = q;
+                    break;
+                }
+            }
+            continue;
+        }
+        if (*p == '}')
+            depth++;
+        else if (*p == '{') {
+            if (depth == 0)
+                return p;
+            depth--;
+        }
+    }
+    return NULL;
+}
+
+static const char *object_end(const char *start, const char *limit) {
+    if (!start || *start != '{')
+        return NULL;
+    return json_skip(start, limit);
+}
+
+static void fill_node(const char *obj, const char *end, igmp_cilium_node *n) {
+    memset(n, 0, sizeof *n);
+    const char *ve = NULL;
+    const char *name = json_key(obj, end, "name", &ve);
+    if (name)
+        json_string(name, ve ? ve : end, n->name, sizeof n->name);
+    ve = NULL;
+    const char *prim = json_key(obj, end, "primary-address", &ve);
+    uint32_t base = 0;
+    int prefix = -1;
+    if (prim && *prim == '{')
+        addressing_ipv4(prim, ve, &n->primary, &base, &prefix);
+    ve = NULL;
+    const char *health = json_key(obj, end, "health-endpoint-address", &ve);
+    if (health && *health == '{')
+        addressing_ipv4(health, ve, &n->health, NULL, NULL);
+    ve = NULL;
+    uint32_t ingress = 0;
+    const char *ing = json_key(obj, end, "ingress-address", &ve);
+    if (ing && *ing == '{')
+        addressing_ipv4(ing, ve, &ingress, NULL, NULL);
+    uint32_t sec[8];
+    int nsec = 0;
+    ve = NULL;
+    const char *arr = json_key(obj, end, "secondary-addresses", &ve);
+    if (arr && *arr == '[') {
+        const char *p = arr + 1;
+        const char *ae = ve ? ve : end;
+        while (p < ae && nsec < 8) {
+            p = json_ws(p, ae);
+            if (p >= ae || *p == ']')
+                break;
+            if (*p == ',') {
+                p++;
+                continue;
+            }
+            if (*p != '{') {
+                p++;
+                continue;
+            }
+            const char *oe = json_skip(p, ae);
+            const char *ie = NULL;
+            const char *ip = json_key(p, oe, "ip", &ie);
+            if (ip) {
+                char s[64];
+                json_string(ip, ie ? ie : oe, s, sizeof s);
+                if (igmp_ip_parse(s, &sec[nsec]) == 0)
+                    nsec++;
+            }
+            p = oe;
+        }
+    }
+    for (int i = 0; i < nsec; i++) {
+        uint32_t ip = sec[i];
+        if (ip == 0 || ip == n->primary || ip == n->health || ip == ingress)
+            continue;
+        if (prefix >= 0 && !cidr_has(ip, base, prefix))
+            continue;
+        n->internal = ip;
+        break;
+    }
+}
+
+int igmp_parse_cilium_nodes(const char *text, igmp_cilium_node *out, int cap) {
+    if (!text || !out || cap < 1)
+        return -1;
+    int n = 0;
+    const char *end = text + strlen(text);
+    const char *p = text;
+    while (p < end && n < cap) {
+        const char *hit = strstr(p, "\"name\"");
+        if (!hit || hit >= end)
+            break;
+        const char *after = json_ws(hit + 6, end);
+        if (after >= end || *after != ':') {
+            p = hit + 6;
+            continue;
+        }
+        const char *obj = enclosing_object(text, hit);
+        if (!obj) {
+            p = hit + 6;
+            continue;
+        }
+        const char *oe = object_end(obj, end);
+        if (!oe) {
+            p = hit + 6;
+            continue;
+        }
+        igmp_cilium_node node;
+        fill_node(obj, oe, &node);
+        if (node.name[0])
+            out[n++] = node;
+        p = oe;
+    }
+    return n;
+}
+
+int igmp_cilium_node_list(const char *bin, char *out, size_t outlen, int timeout_ms) {
+    char b[256];
+    snprintf(b, sizeof b, "%s", bin && bin[0] ? bin : "cilium-dbg");
+    char *argv[] = {b, "node", "list", "-o", "json", NULL};
+    return run_argv(argv, out, outlen, timeout_ms > 0 ? timeout_ms : 3000);
+}
+
 static int ledger_load(const char *path, igmp_actual *rows, int cap) {
     FILE *fp = fopen(path, "r");
     if (!fp)

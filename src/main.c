@@ -48,6 +48,11 @@ static int64_t reconcile_ms = 5000;
 static int64_t next_reconcile;
 static char iface_names[MAX_IFACES][IF_NAMESIZE];
 static int niface;
+static char cilium_bin[256] = "cilium-dbg";
+static uint32_t host_ip_cfg;
+static uint32_t cilium_host_addr;
+static int identity_ok = -1;
+static uint32_t identity_logged;
 static kube_client *kube;
 static int kube_coord;
 static char http_host[64] = "0.0.0.0";
@@ -91,8 +96,8 @@ static void log_msg(const char *level, const char *msg) {
             rt && rt->node_name[0] ? rt->node_name : "");
 }
 
-/* Cilium forwards remote multicast to CiliumInternalIP, the IPv4 address on
- * cilium_host. status.hostIP is a different address and is not a subscriber. */
+/* First IPv4 on an interface. cilium_host can also hold a stale router address,
+ * so this is logged and not used as the VXLAN identity. */
 static int iface_ipv4(const char *name, char *out, size_t cap) {
     struct ifaddrs *list = NULL;
     if (!name || !name[0] || getifaddrs(&list) != 0)
@@ -436,6 +441,101 @@ static void ctrl_line(int fd, char *line) {
     }
 }
 
+static int cilium_name_is(const char *listed, const char *want) {
+    if (!listed || !want || !want[0])
+        return 0;
+    if (strcmp(listed, want) == 0)
+        return 1;
+    size_t ll = strlen(listed);
+    size_t wl = strlen(want);
+    return ll > wl && listed[ll - wl - 1] == '/' && strcmp(listed + (ll - wl), want) == 0;
+}
+
+/* CiliumInternalIP comes from `cilium-dbg node list`, not from status.hostIP
+ * and not from the first address on cilium_host. A failed list leaves the
+ * last good identity in place and does not publish the Kubernetes node IP. */
+static int refresh_cilium_identity(void) {
+    char *buf = malloc(1 << 20);
+    if (!buf)
+        return -1;
+    if (igmp_cilium_node_list(cilium_bin, buf, 1 << 20, 3000) != 0) {
+        free(buf);
+        if (identity_ok != 0) {
+            identity_ok = 0;
+            log_msg("warn", "cilium-identity-failed");
+        }
+        return -1;
+    }
+    igmp_cilium_node nodes[128];
+    int n = igmp_parse_cilium_nodes(buf, nodes, 128);
+    free(buf);
+    igmp_ip_rewrite rw[128];
+    int nr = 0;
+    uint32_t self = 0;
+    for (int i = 0; i < n && nr < 128; i++) {
+        if (!nodes[i].name[0] || nodes[i].internal == 0)
+            continue;
+        snprintf(rw[nr].name, sizeof rw[nr].name, "%s", nodes[i].name);
+        rw[nr].ip = nodes[i].internal;
+        if (cilium_name_is(nodes[i].name, rt->node_name))
+            self = nodes[i].internal;
+        nr++;
+    }
+    if (nr == 0) {
+        if (identity_ok != 0) {
+            identity_ok = 0;
+            log_msg("warn", "cilium-identity-empty");
+        }
+        return -1;
+    }
+    igmp_runtime_set_identities(rt, rw, nr);
+    if (self == 0) {
+        if (identity_ok != 0) {
+            identity_ok = 0;
+            log_msg("warn", "cilium-identity-missing");
+        }
+        return -1;
+    }
+    rt->node_ip = self;
+    rt->eng->cfg.self_ip = self;
+    if (identity_ok != 1 || identity_logged != self) {
+        identity_ok = 1;
+        identity_logged = self;
+        char ip[32], host[32], face[32];
+        igmp_ip_fmt(self, ip, sizeof ip);
+        igmp_ip_fmt(host_ip_cfg, host, sizeof host);
+        igmp_ip_fmt(cilium_host_addr, face, sizeof face);
+        fprintf(stderr,
+                "{\"level\":\"info\",\"msg\":\"node-ip\",\"ip\":\"%s\","
+                "\"source\":\"cilium-internal\",\"host-ip\":\"%s\","
+                "\"cilium-host-ip\":\"%s\",\"node\":\"%s\"}\n",
+                ip, host, face, rt->node_name);
+    }
+    return 0;
+}
+
+static void send_pending_joins(void) {
+    igmp_local_join js[32];
+    int n = igmp_runtime_take_joins(rt, js, 32);
+    if (n <= 0 || rt->dry_run || no_capture)
+        return;
+    int sent = 0;
+    int failed = 0;
+    for (int i = 0; i < n; i++) {
+        char ns[64];
+        if (igmp_netns_for_local_ip(js[i].subscriber, ns, sizeof ns) != 0 ||
+            igmp_v3_toex_send(ns, js[i].subscriber, js[i].group) != 0)
+            failed++;
+        else
+            sent++;
+    }
+    if (sent || failed)
+        fprintf(stderr,
+                "{\"level\":\"info\",\"msg\":\"local-join\",\"sent\":%d,\"failed\":%d,"
+                "\"node\":\"%s\"}\n",
+                sent, failed, rt->node_name);
+}
+
 static void send_pending_queries(void) {
     igmp_query_out qs[32];
     int n = 0;
@@ -480,8 +580,8 @@ static void usage(void) {
             "  --cilium-dbg PATH       cilium-dbg binary (default cilium-dbg)\n"
             "  --coord-dir PATH        per-node membership snapshots\n"
             "  --node-name NAME        this node\n"
-            "  --node-ip ADDR          fallback node IP when cilium_host is absent\n"
-            "  --cilium-host-iface IF  interface whose IPv4 is CiliumInternalIP (default cilium_host)\n"
+            "  --node-ip ADDR          Kubernetes node IP, logged only on the cilium backend\n"
+            "  --cilium-host-iface IF  logged only; not the remote subscriber (default cilium_host)\n"
             "  --self-ip ADDR          querier election address\n"
             "  --listen HOST:PORT      health and metrics (default 0.0.0.0:9080)\n"
             "  --control HOST:PORT     line protocol for tests\n"
@@ -638,10 +738,16 @@ int main(int argc, char **argv) {
     }
     cfg.active_querier = active;
     cfg.immediate_leave = immediate;
+    snprintf(cilium_bin, sizeof cilium_bin, "%s", cilium);
     if (self_ip[0])
         igmp_ip_parse(self_ip, &cfg.self_ip);
     else if (node_ip[0])
         igmp_ip_parse(node_ip, &cfg.self_ip);
+    /* The chart passes status.hostIP as both. That address is not the overlay
+     * identity, and using it as the querier address makes our own queries look
+     * foreign once the real identity is installed. */
+    if (strcmp(backend_kind, "cilium") == 0)
+        cfg.self_ip = 0;
     int64_t now = mono_ms();
     rt = igmp_runtime_new(&cfg, now);
     if (!rt)
@@ -653,20 +759,16 @@ int main(int argc, char **argv) {
     if (coord[0] && igmp_coord_ensure(coord) != 0)
         fprintf(stderr, "{\"level\":\"warn\",\"msg\":\"coord-dir-create-failed\",\"node\":\"%s\"}\n",
                 node);
-    const char *ip_source = "node-ip";
     if (node_ip[0])
-        igmp_ip_parse(node_ip, &rt->node_ip);
-    char cilium_ip[64];
-    if (iface_ipv4(cilium_host_iface, cilium_ip, sizeof cilium_ip) == 0 &&
-        igmp_ip_parse(cilium_ip, &rt->node_ip) == 0) {
-        ip_source = "cilium_host";
-        /* Querier identity and the source of injected queries follow the
-         * same address, so a capture of our own query is not a foreign querier. */
-        rt->eng->cfg.self_ip = rt->node_ip;
-    } else if (strcmp(backend_kind, "cilium") == 0 && cilium_host_iface[0])
-        fprintf(stderr,
-                "{\"level\":\"warn\",\"msg\":\"cilium-host-missing\",\"iface\":\"%s\",\"node\":\"%s\"}\n",
-                cilium_host_iface, node);
+        igmp_ip_parse(node_ip, &host_ip_cfg);
+    if (strcmp(backend_kind, "cilium") == 0) {
+        rt->node_ip = 0;
+        char face[64];
+        if (iface_ipv4(cilium_host_iface, face, sizeof face) == 0)
+            igmp_ip_parse(face, &cilium_host_addr);
+    } else {
+        rt->node_ip = host_ip_cfg;
+    }
     if (strcmp(backend_kind, "cilium") == 0) {
         snprintf(rt->ledger_path, sizeof rt->ledger_path, "%s", ledger);
         rt->mark_from_ledger = 1;
@@ -698,6 +800,8 @@ int main(int argc, char **argv) {
     if (pcap_path) {
         if (replay_file(pcap_path) != 0)
             return 1;
+        if (strcmp(backend_kind, "cilium") == 0)
+            refresh_cilium_identity();
         igmp_runtime_reconcile(rt);
         igmp_runtime_write_snapshot(rt);
         if (!no_ws)
@@ -737,11 +841,16 @@ int main(int argc, char **argv) {
     next_reconcile = now;
     char ctrlbuf[8192];
     size_t ctrl_len = 0;
-    char ipb[32];
-    igmp_ip_fmt(rt->node_ip, ipb, sizeof ipb);
-    fprintf(stderr,
-            "{\"level\":\"info\",\"msg\":\"node-ip\",\"ip\":\"%s\",\"source\":\"%s\",\"node\":\"%s\"}\n",
-            ipb, ip_source, rt->node_name);
+    if (strcmp(backend_kind, "cilium") == 0)
+        refresh_cilium_identity();
+    else {
+        char ipb[32];
+        igmp_ip_fmt(rt->node_ip, ipb, sizeof ipb);
+        fprintf(stderr,
+                "{\"level\":\"info\",\"msg\":\"node-ip\",\"ip\":\"%s\",\"source\":\"node-ip\","
+                "\"node\":\"%s\"}\n",
+                ipb, rt->node_name);
+    }
     log_msg("info", "started");
     for (;;) {
         if (!manual_time)
@@ -854,6 +963,8 @@ int main(int argc, char **argv) {
                                     st, rt->node_name);
                     }
                 }
+                if (strcmp(backend_kind, "cilium") == 0)
+                    refresh_cilium_identity();
                 igmp_runtime_write_snapshot(rt);
                 if (kube_coord && coord[0] && node[0]) {
                     char path[768];
@@ -883,6 +994,7 @@ int main(int argc, char **argv) {
             /* After reconcile, so a solicit lands once the group map exists.
              * Cilium records a local subscriber only from a report that
              * arrives while that map is already there. */
+            send_pending_joins();
             send_pending_queries();
         }
     }

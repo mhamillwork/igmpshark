@@ -7,12 +7,18 @@
 
 #include "igmp_types.h"
 
+#include <ctype.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/if.h>
+#include <sched.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 int igmp_query_build(uint8_t *out, size_t cap, uint32_t group_host, int max_resp_ms, int version) {
@@ -150,4 +156,219 @@ int igmp_query_send(const char *ifname, uint32_t src_host, uint32_t group_host, 
         rc = send_on(fd, 0, src_host, dest, pkt, n);
     close(fd);
     return rc;
+}
+
+int igmp_v3_toex_build(uint8_t *out, size_t cap, uint32_t group_host) {
+    if (!out || cap < 16)
+        return -1;
+    memset(out, 0, 16);
+    out[0] = 0x22;
+    out[7] = 1;
+    out[8] = IGMP_REC_TO_EXCLUDE;
+    uint32_t g = htonl(group_host);
+    memcpy(out + 12, &g, 4);
+    uint16_t c = igmp_checksum(out, 16);
+    out[2] = (uint8_t)(c >> 8);
+    out[3] = (uint8_t)c;
+    return 16;
+}
+
+static int line_has_token(const char *s, size_t len, const char *tok) {
+    size_t n = strlen(tok);
+    for (size_t i = 0; i + n <= len; i++) {
+        if (memcmp(s + i, tok, n) != 0)
+            continue;
+        if (i > 0) {
+            unsigned char prev = (unsigned char)s[i - 1];
+            if (isdigit(prev) || prev == '.')
+                continue;
+        }
+        if (i + n < len) {
+            unsigned char next = (unsigned char)s[i + n];
+            if (isdigit(next) || next == '.')
+                continue;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+int igmp_fib_trie_has_local(const char *text, uint32_t ip) {
+    if (!text || ip == 0)
+        return 0;
+    char want[32];
+    igmp_ip_fmt(ip, want, sizeof want);
+    const char *lines[6];
+    size_t lens[6];
+    int nlines = 0;
+    int in_local = 0;
+    const char *p = text;
+    while (*p) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        int header = 0;
+        if (len >= 5 && strncmp(p, "Local", 5) == 0 && (len == 5 || p[5] == ':')) {
+            in_local = 1;
+            nlines = 0;
+            header = 1;
+        } else if (len >= 4 && strncmp(p, "Main", 4) == 0 && (len == 4 || p[4] == ':')) {
+            in_local = 0;
+            nlines = 0;
+            header = 1;
+        }
+        if (!header && in_local) {
+            if (nlines < 6) {
+                lines[nlines] = p;
+                lens[nlines] = len;
+                nlines++;
+            } else {
+                memmove(lines, lines + 1, 5 * sizeof *lines);
+                memmove(lens, lens + 1, 5 * sizeof *lens);
+                lines[5] = p;
+                lens[5] = len;
+            }
+            for (int i = 0; i < nlines; i++) {
+                if (!line_has_token(lines[i], lens[i], want))
+                    continue;
+                for (int j = i; j < nlines; j++) {
+                    if (memmem(lines[j], lens[j], "/32 host LOCAL", 14))
+                        return 1;
+                    if (j > i && memmem(lines[j], lens[j], "/32 host UNICAST", 16))
+                        break;
+                }
+            }
+        }
+        if (!eol)
+            break;
+        p = eol + 1;
+    }
+    return 0;
+}
+
+static int read_trie(const char *path, char *buf, size_t cap) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    size_t n = 0;
+    while (n + 1 < cap) {
+        ssize_t r = read(fd, buf + n, cap - 1 - n);
+        if (r < 0) {
+            close(fd);
+            return -1;
+        }
+        if (r == 0)
+            break;
+        n += (size_t)r;
+    }
+    close(fd);
+    buf[n] = 0;
+    return 0;
+}
+
+int igmp_netns_for_local_ip(uint32_t ip, char *out, size_t cap) {
+    if (!out || cap < 16 || ip == 0)
+        return -1;
+    static uint32_t cached_ip;
+    static char cached[64];
+    if (cached_ip == ip && cached[0]) {
+        char pidbuf[32];
+        /* /proc/<pid>/ns/net -> trie at /proc/<pid>/net/fib_trie */
+        {
+            const char *ns = strstr(cached, "/ns/net");
+            if (ns && (size_t)(ns - cached) < sizeof pidbuf) {
+                memcpy(pidbuf, cached, (size_t)(ns - cached));
+                pidbuf[ns - cached] = 0;
+                char trie[96];
+                snprintf(trie, sizeof trie, "%s/net/fib_trie", pidbuf);
+                char body[1 << 16];
+                if (read_trie(trie, body, sizeof body) == 0 && igmp_fib_trie_has_local(body, ip)) {
+                    snprintf(out, cap, "%s", cached);
+                    return 0;
+                }
+            }
+        }
+        cached_ip = 0;
+        cached[0] = 0;
+    }
+    struct stat selfns;
+    if (stat("/proc/self/ns/net", &selfns) != 0)
+        return -1;
+    DIR *d = opendir("/proc");
+    if (!d)
+        return -1;
+    ino_t seen[2048];
+    int nseen = 0;
+    struct dirent *de;
+    int found = 0;
+    while (!found && (de = readdir(d)) != NULL) {
+        char pid[16];
+        size_t pi = 0;
+        for (; de->d_name[pi] && pi + 1 < sizeof pid; pi++) {
+            if (de->d_name[pi] < '0' || de->d_name[pi] > '9')
+                break;
+            pid[pi] = de->d_name[pi];
+        }
+        if (pi == 0 || de->d_name[pi] != 0)
+            continue;
+        pid[pi] = 0;
+        char nspath[64];
+        snprintf(nspath, sizeof nspath, "/proc/%s/ns/net", pid);
+        struct stat st;
+        if (stat(nspath, &st) != 0 || st.st_ino == selfns.st_ino)
+            continue;
+        int dup = 0;
+        for (int i = 0; i < nseen; i++)
+            if (seen[i] == st.st_ino)
+                dup = 1;
+        if (dup)
+            continue;
+        if (nseen < 2048)
+            seen[nseen++] = st.st_ino;
+        char trie[80];
+        snprintf(trie, sizeof trie, "/proc/%s/net/fib_trie", pid);
+        char body[1 << 16];
+        if (read_trie(trie, body, sizeof body) != 0)
+            continue;
+        if (!igmp_fib_trie_has_local(body, ip))
+            continue;
+        snprintf(out, cap, "%s", nspath);
+        snprintf(cached, sizeof cached, "%s", nspath);
+        cached_ip = ip;
+        found = 1;
+    }
+    closedir(d);
+    return found ? 0 : -1;
+}
+
+int igmp_v3_toex_send(const char *netns_path, uint32_t src_host, uint32_t group_host) {
+    if (!netns_path || !netns_path[0] || src_host == 0 || group_host == 0)
+        return -1;
+    uint8_t pkt[16];
+    if (igmp_v3_toex_build(pkt, sizeof pkt, group_host) != 16)
+        return -1;
+    pid_t pid = fork();
+    if (pid < 0)
+        return -1;
+    if (pid == 0) {
+        int ns = open(netns_path, O_RDONLY);
+        if (ns < 0)
+            _exit(1);
+        if (setns(ns, CLONE_NEWNET) != 0)
+            _exit(1);
+        close(ns);
+        int fd = socket(AF_INET, SOCK_RAW, IPPROTO_IGMP);
+        if (fd < 0)
+            _exit(1);
+        int one = 1;
+        if (setsockopt(fd, IPPROTO_IP, IP_HDRINCL, &one, sizeof one) != 0)
+            _exit(1);
+        unsigned idx = if_nametoindex("eth0");
+        int rc = idx ? send_on(fd, idx, src_host, 0xe0000016u, pkt, 16) : -1;
+        close(fd);
+        _exit(rc == 0 ? 0 : 1);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0)
+        return -1;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
 }

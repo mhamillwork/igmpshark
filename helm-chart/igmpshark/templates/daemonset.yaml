@@ -60,8 +60,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            # Fallback only. The process prefers the IPv4 address on cilium_host,
-            # which is the CiliumInternalIP used as a remote multicast subscriber.
+            # Kubernetes node InternalIP. Logged as host-ip. It is not the
+            # remote subscriber. CiliumInternalIP comes from cilium-dbg node list.
             - name: NODE_IP
               valueFrom:
                 fieldRef:

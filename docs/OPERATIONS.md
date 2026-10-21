@@ -28,7 +28,7 @@ These are bounds, not measurements from a Cilium cluster. The simulation measure
 | Container restart, same pod UID | No cleanup. The restart counter is ignored. |
 | Replacement pod, new UID, same IP | The new UID is bound immediately. A late delete for the old UID does not remove it. |
 | igmpshark restart | Grace period first (15 s), then the normal bounds. State is restored from the local snapshot before deletes. |
-| Cilium restart | Next reconcile re-adds groups and remote nodes. Local pod entries reappear when the solicited report hits the datapath. |
+| Cilium restart | Next reconcile re-adds groups and remote nodes. Local pod entries reappear when the injected IGMPv3 CHANGE_TO_EXCLUDE report hits the datapath. |
 | API or coord outage | No mass delete. Remote rows for nodes whose snapshots are stale are held. |
 
 ## Dry-run
@@ -61,7 +61,9 @@ tcpdump -i any -n igmp
 
 If tcpdump shows reports and igmpshark does not, check the BPF filter compiled, the interface name, and whether libwireshark rejected the link type (`igmpshark_malformed_total` versus a silent skip). If the reports use a source that is not a pod IP on this node after the first pod list, they are counted in `igmpshark_ignored_unbound_total` on purpose.
 
-If the group exists in Cilium but the pod address is not a `Local` subscriber, the report was snooped before the group map existed. The next reconciles send a group-specific query toward the pod (`local-solicit` in the log, `igmpshark_queries_sent_total` increasing) until that `Local` row appears. `--active-querier` is not required for this. A node that only has the other node's remote subscriber does not solicit; the node where the pod runs does.
+If the group exists in Cilium but the pod address is not a `Local` subscriber, the join was snooped before the group map existed. Cilium does not create that row from a query response. The next reconciles inject an IGMPv3 CHANGE_TO_EXCLUDE report from the pod namespace (`local-join` in the log) until that `Local` row appears. A node that only has the other node's remote subscriber does not inject; the node where the pod runs does.
+
+`node-ip` in the log is the CiliumInternalIP (`source` is `cilium-internal`). `host-ip` is the Kubernetes node InternalIP (`status.hostIP`). `cilium-host-ip` is whatever address was configured first on `cilium_host`; traffic from the cilium-health endpoint and from a stale address on that interface shows up in tcpdump and is not a pod. Remote subscribers have to be the CiliumInternalIP or VXLAN does not land on the other node. `cilium-identity-failed` means the node list could not be read, and no Kubernetes node IP was installed in its place.
 
 ## Capabilities and mounts
 

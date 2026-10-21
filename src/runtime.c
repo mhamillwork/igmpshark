@@ -31,11 +31,43 @@ typedef struct igmp_rt_extra {
     int retry_cap;
     uint64_t retry_gen;
     int solicit_at;
+    int join_at;
+    int njoins;
+    igmp_local_join joins[32];
+    igmp_ip_rewrite ids[128];
+    int nids;
     igmp_iface ifaces[64];
 } igmp_rt_extra;
 
 static igmp_rt_extra *extra(igmp_runtime *rt) {
     return (igmp_rt_extra *)(rt + 1);
+}
+
+void igmp_runtime_set_identities(igmp_runtime *rt, const igmp_ip_rewrite *rows, int n) {
+    igmp_rt_extra *x = extra(rt);
+    x->nids = 0;
+    if (!rows || n <= 0)
+        return;
+    if (n > 128)
+        n = 128;
+    for (int i = 0; i < n; i++) {
+        if (!rows[i].name[0] || rows[i].ip == 0)
+            continue;
+        x->ids[x->nids++] = rows[i];
+    }
+}
+
+int igmp_runtime_take_joins(igmp_runtime *rt, igmp_local_join *out, int cap) {
+    igmp_rt_extra *x = extra(rt);
+    int n = x->njoins;
+    if (n > cap)
+        n = cap;
+    if (n < 0)
+        n = 0;
+    if (out && n > 0)
+        memcpy(out, x->joins, (size_t)n * sizeof *out);
+    x->njoins = 0;
+    return n;
 }
 
 static void logj(const igmp_runtime *rt, const char *level, const char *msg) {
@@ -465,6 +497,58 @@ static int solicit_missing_locals(igmp_runtime *rt, const igmp_actual *actual, i
     return queued;
 }
 
+static int queue_join(igmp_rt_extra *x, uint32_t group, uint32_t sub) {
+    if (!group || !sub)
+        return 0;
+    for (int i = 0; i < x->njoins; i++)
+        if (x->joins[i].group == group && x->joins[i].subscriber == sub)
+            return 0;
+    if (x->njoins >= 32)
+        return -1;
+    x->joins[x->njoins].group = group;
+    x->joins[x->njoins].subscriber = sub;
+    x->njoins++;
+    return 1;
+}
+
+/* Cilium inserts a local subscriber from CHANGE_TO_EXCLUDE, which is what the
+ * pod sent before the group map existed. Queue one injection per missing pod. */
+static void queue_joins_for_group(igmp_runtime *rt, uint32_t group, const igmp_actual *actual,
+                                  int nactual) {
+    igmp_rt_extra *x = extra(rt);
+    for (int i = 0; i < IGMP_MAX_MEMBERS; i++) {
+        const igmp_member *m = &rt->eng->members[i];
+        if (!m->used || !m->joined || m->group != group)
+            continue;
+        if (actual_has_local(actual, nactual, group, m->subscriber))
+            continue;
+        if (queue_join(x, group, m->subscriber) < 0)
+            return;
+    }
+}
+
+static void queue_missing_joins(igmp_runtime *rt, const igmp_actual *actual, int nactual) {
+    igmp_rt_extra *x = extra(rt);
+    int start = x->join_at;
+    if (start < 0 || start >= IGMP_MAX_MEMBERS)
+        start = 0;
+    for (int n = 0; n < IGMP_MAX_MEMBERS; n++) {
+        int i = (start + n) % IGMP_MAX_MEMBERS;
+        const igmp_member *m = &rt->eng->members[i];
+        if (!m->used || !m->joined)
+            continue;
+        if (!actual_has_group(actual, nactual, m->group))
+            continue;
+        if (actual_has_local(actual, nactual, m->group, m->subscriber))
+            continue;
+        if (queue_join(x, m->group, m->subscriber) < 0) {
+            x->join_at = i;
+            return;
+        }
+    }
+    x->join_at = 0;
+}
+
 static void ledger_after_op(igmp_runtime *rt, const igmp_op *op) {
     if (!rt->ledger_path[0])
         return;
@@ -484,6 +568,7 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
     if (!rt->backend || !rt->backend->load || !rt->backend->apply)
         return -1;
     igmp_rt_extra *x = extra(rt);
+    x->njoins = 0;
     igmp_actual *actual = calloc(4096, sizeof *actual);
     igmp_local_sub *local = calloc(4096, sizeof *local);
     igmp_remote_sub *remote = calloc(2048, sizeof *remote);
@@ -517,8 +602,8 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
     int allow_remote = 1;
     if (rt->coord_dir[0]) {
         nremote = igmp_coord_load_remote(rt->coord_dir, rt->node_name, igmp_coord_now_ms(),
-                                         rt->snap_max_age_ms,
-                                         remote, 2048, stale, 128, &nstale);
+                                         rt->snap_max_age_ms, remote, 2048, stale, 128, &nstale,
+                                         x->ids, x->nids);
         if (nremote < 0) {
             nremote = 0;
             allow_remote = 0;
@@ -606,10 +691,13 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
                                    solicit_version(rt->eng, ops[i].group, 0, NULL, 0));
             if (rc > 0)
                 solicited += rc;
+            queue_joins_for_group(rt, ops[i].group, actual, nactual);
         }
     }
-    if (!failed && !continue_plan)
+    if (!failed && !continue_plan) {
         solicited += solicit_missing_locals(rt, actual, nactual);
+        queue_missing_joins(rt, actual, nactual);
+    }
     if (rt->log_json && solicited > 0) {
         fprintf(stderr,
                 "{\"level\":\"info\",\"msg\":\"local-solicit\",\"count\":%d,\"node\":\"%s\"}\n",

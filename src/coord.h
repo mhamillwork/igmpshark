@@ -21,6 +21,13 @@ typedef struct igmp_peer {
     int fresh;
 } igmp_peer;
 
+/* Overlay address for a node, from Cilium rather than from the snapshot.
+ * name may be the Kubernetes name or cluster/name. */
+typedef struct igmp_ip_rewrite {
+    char name[IGMP_NODE_LEN];
+    uint32_t ip;
+} igmp_ip_rewrite;
+
 /* Realtime milliseconds. Snapshot NODE timestamps use this so another node
  * can age them. Protocol timers stay on the monotonic clock. */
 int64_t igmp_coord_now_ms(void);
@@ -36,9 +43,13 @@ int igmp_coord_write(const char *dir, const char *node, uint32_t node_ip, int ac
 int igmp_coord_peers(const char *dir, const char *self_node, int64_t now_ms,
                      int64_t max_age_ms, igmp_peer *out, int cap);
 
+/* rewrite replaces a peer's published address by node name. When nrewrite is
+ * greater than zero, a peer that is not in the table is skipped: the address
+ * in its snapshot is not installed. nrewrite zero keeps the snapshot address. */
 int igmp_coord_load_remote(const char *dir, const char *self_node, int64_t now_ms,
                            int64_t max_age_ms, igmp_remote_sub *out, int cap,
-                           uint32_t *stale_ips, int stale_cap, int *nstale);
+                           uint32_t *stale_ips, int stale_cap, int *nstale,
+                           const igmp_ip_rewrite *rewrite, int nrewrite);
 
 int igmp_coord_load_self(const char *dir, const char *self_node, igmp_snap_mem *out, int cap);
 

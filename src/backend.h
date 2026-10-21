@@ -27,4 +27,23 @@ int igmp_ledger_has(const char *path, uint32_t group, uint32_t addr, int remote)
  * the caller marks rows it owns. Returns the number of rows, or -1. */
 int igmp_parse_cilium_subscribers(const char *text, igmp_actual *rows, int cap);
 
+/* One node from `cilium-dbg node list -o json`. internal is the
+ * CiliumInternalIP (secondary address inside the pod CIDR). primary is the
+ * Kubernetes node IP. health is the cilium-health endpoint. internal is 0
+ * when the list has no usable overlay address; primary is never copied into
+ * it. */
+typedef struct igmp_cilium_node {
+    char name[IGMP_NODE_LEN];
+    uint32_t primary;
+    uint32_t health;
+    uint32_t internal;
+} igmp_cilium_node;
+
+/* Accepts a JSON array, or an object with "nodes" or "nodes-added". Returns
+ * the number of nodes parsed, or -1. */
+int igmp_parse_cilium_nodes(const char *text, igmp_cilium_node *out, int cap);
+
+/* Run `bin node list -o json`. bin NULL uses cilium-dbg. */
+int igmp_cilium_node_list(const char *bin, char *out, size_t outlen, int timeout_ms);
+
 #endif

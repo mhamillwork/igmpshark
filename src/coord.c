@@ -167,9 +167,32 @@ int igmp_coord_peers(const char *dir, const char *self_node, int64_t now_ms, int
     return n;
 }
 
+static int name_is(const char *listed, const char *want) {
+    if (!listed || !want || !want[0])
+        return 0;
+    if (strcmp(listed, want) == 0)
+        return 1;
+    size_t ll = strlen(listed);
+    size_t wl = strlen(want);
+    return ll > wl && listed[ll - wl - 1] == '/' && strcmp(listed + (ll - wl), want) == 0;
+}
+
+static uint32_t rewritten_ip(const igmp_ip_rewrite *rewrite, int nrewrite, const char *name) {
+    if (!rewrite || nrewrite <= 0 || !name || !name[0])
+        return 0;
+    for (int i = 0; i < nrewrite; i++) {
+        if (!rewrite[i].ip)
+            continue;
+        if (name_is(rewrite[i].name, name) || name_is(name, rewrite[i].name))
+            return rewrite[i].ip;
+    }
+    return 0;
+}
+
 int igmp_coord_load_remote(const char *dir, const char *self_node, int64_t now_ms,
                            int64_t max_age_ms, igmp_remote_sub *out, int cap,
-                           uint32_t *stale_ips, int stale_cap, int *nstale) {
+                           uint32_t *stale_ips, int stale_cap, int *nstale,
+                           const igmp_ip_rewrite *rewrite, int nrewrite) {
     if (nstale)
         *nstale = 0;
     igmp_peer peers[128];
@@ -180,8 +203,14 @@ int igmp_coord_load_remote(const char *dir, const char *self_node, int64_t now_m
     int ns = 0;
     for (int i = 0; i < np; i++) {
         if (!peers[i].fresh) {
-            if (stale_ips && ns < stale_cap && peers[i].ip)
-                stale_ips[ns++] = peers[i].ip;
+            uint32_t held = peers[i].ip;
+            if (nrewrite > 0) {
+                uint32_t mapped = rewritten_ip(rewrite, nrewrite, peers[i].name);
+                if (mapped)
+                    held = mapped;
+            }
+            if (stale_ips && ns < stale_cap && held)
+                stale_ips[ns++] = held;
             continue;
         }
         char *buf = malloc(1 << 20);
@@ -200,19 +229,28 @@ int igmp_coord_load_remote(const char *dir, const char *self_node, int64_t now_m
         igmp_peer peer;
         igmp_coord_parse(buf, &peer, mem, 1024, &nm);
         free(buf);
+        uint32_t use_ip = peer.ip;
+        if (nrewrite > 0) {
+            uint32_t mapped = rewritten_ip(rewrite, nrewrite, peer.name[0] ? peer.name : peers[i].name);
+            if (!mapped) {
+                free(mem);
+                continue;
+            }
+            use_ip = mapped;
+        }
         for (int m = 0; m < nm; m++) {
-            if (!mem[m].joined || peer.ip == 0)
+            if (!mem[m].joined || use_ip == 0)
                 continue;
             int found = 0;
             for (int r = 0; r < n; r++) {
-                if (out[r].node_ip == peer.ip && out[r].group == mem[m].group) {
+                if (out[r].node_ip == use_ip && out[r].group == mem[m].group) {
                     out[r].joined_count++;
                     found = 1;
                     break;
                 }
             }
             if (!found && n < cap) {
-                out[n].node_ip = peer.ip;
+                out[n].node_ip = use_ip;
                 out[n].group = mem[m].group;
                 out[n].joined_count = 1;
                 n++;
