@@ -55,9 +55,15 @@ typedef struct igmp_rt_extra {
     uint64_t remote_sig;
     igmp_iface ifaces[64];
     igmp_held held[IGMP_HELD_MAX];
-    uint32_t local_seen[32];
+    uint32_t local_seen[128];
     int nlocal_seen;
 } igmp_rt_extra;
+
+static int (*pod_local_fn)(uint32_t ip);
+
+void igmp_runtime_set_pod_local_fn(int (*fn)(uint32_t ip)) {
+    pod_local_fn = fn;
+}
 
 static igmp_rt_extra *extra(igmp_runtime *rt) {
     return (igmp_rt_extra *)(rt + 1);
@@ -105,6 +111,23 @@ static void logj(const igmp_runtime *rt, const char *level, const char *msg) {
         return;
     fprintf(stderr, "{\"level\":\"%s\",\"msg\":\"%s\",\"node\":\"%s\"}\n", level, msg,
             rt->node_name);
+}
+
+static void log_member(igmp_runtime *rt, const char *msg, const char *reason, uint32_t ip,
+                       int count) {
+    if (msg && strcmp(msg, "member-deleted") == 0)
+        snprintf(rt->cleanup_reason, sizeof rt->cleanup_reason, "%s", reason ? reason : "");
+    if (!rt->log_json || count <= 0)
+        return;
+    char ipb[32];
+    if (ip)
+        igmp_ip_fmt(ip, ipb, sizeof ipb);
+    else
+        snprintf(ipb, sizeof ipb, "%s", "-");
+    fprintf(stderr,
+            "{\"level\":\"info\",\"msg\":\"%s\",\"reason\":\"%s\",\"ip\":\"%s\",\"count\":%d,"
+            "\"node\":\"%s\"}\n",
+            msg, reason ? reason : "", ipb, count, rt->node_name);
 }
 
 /* Each cilium-dbg call can take the full command timeout. A full pass over
@@ -189,6 +212,141 @@ static int pod_on_this_node(const igmp_runtime *rt, const char *node) {
     return strcmp(node, rt->node_name) == 0;
 }
 
+static int seen_local(const igmp_runtime *rt, uint32_t ip) {
+    const igmp_rt_extra *x = extra((igmp_runtime *)rt);
+    if (ip == 0)
+        return 0;
+    for (int i = 0; i < x->nlocal_seen; i++)
+        if (x->local_seen[i] == ip)
+            return 1;
+    return 0;
+}
+
+static void note_local(igmp_runtime *rt, uint32_t ip) {
+    igmp_rt_extra *x = extra(rt);
+    if (ip == 0 || seen_local(rt, ip))
+        return;
+    if (x->nlocal_seen >= (int)(sizeof x->local_seen / sizeof x->local_seen[0]))
+        return;
+    x->local_seen[x->nlocal_seen++] = ip;
+}
+
+static void forget_local(igmp_runtime *rt, uint32_t ip) {
+    igmp_rt_extra *x = extra(rt);
+    for (int i = 0; i < x->nlocal_seen; i++) {
+        if (x->local_seen[i] != ip)
+            continue;
+        x->local_seen[i] = x->local_seen[x->nlocal_seen - 1];
+        x->nlocal_seen--;
+        return;
+    }
+}
+
+static int pod_namespace_live(uint32_t ip) {
+    if (pod_local_fn)
+        return pod_local_fn(ip);
+    char ns[64];
+    return igmp_netns_for_local_ip(ip, ns, sizeof ns) == 0;
+}
+
+/* The pod list is one snapshot behind a restart. An address is still current
+ * when the API has it, or when a pod network namespace on this node owns it. */
+static int subscriber_live(igmp_runtime *rt, uint32_t ip) {
+    if (pod_for_src(rt, ip))
+        return 1;
+    if (seen_local(rt, ip))
+        return 1;
+    if (pod_namespace_live(ip)) {
+        note_local(rt, ip);
+        return 1;
+    }
+    return 0;
+}
+
+static void refresh_local_seen(igmp_runtime *rt) {
+    igmp_rt_extra *x = extra(rt);
+    for (int i = 0; i < x->nlocal_seen;) {
+        uint32_t ip = x->local_seen[i];
+        /* A table hit is not enough. The note means a pod namespace owns
+         * this address, and that has to be checked again after a restart. */
+        if (pod_namespace_live(ip)) {
+            i++;
+            continue;
+        }
+        x->local_seen[i] = x->local_seen[x->nlocal_seen - 1];
+        x->nlocal_seen--;
+    }
+}
+
+static int drop_subscriber(igmp_runtime *rt, uint32_t ip, const char *reason) {
+    int n = igmp_engine_subscriber_gone(rt->eng, ip, rt->now_ms);
+    if (n <= 0)
+        return 0;
+    rt->cleanups += (uint64_t)n;
+    log_member(rt, "member-deleted", reason, ip, n);
+    rt->gen++;
+    forget_local(rt, ip);
+    return n;
+}
+
+/* uid is leaving the pod table. Memberships whose address is still a running
+ * pod stay; that is the new IP from a restart the list has not published. */
+static int drop_uid(igmp_runtime *rt, const char *uid, const char *reason) {
+    uint32_t subs[16];
+    int nsubs = 0;
+    int total = 0;
+    if (!uid || !uid[0])
+        return 0;
+    for (int i = 0; i < IGMP_MAX_MEMBERS; i++) {
+        igmp_member *m = &rt->eng->members[i];
+        int seen = 0;
+        if (!m->used || strcmp(m->pod_uid, uid) != 0 || m->subscriber == 0)
+            continue;
+        for (int s = 0; s < nsubs; s++)
+            if (subs[s] == m->subscriber)
+                seen = 1;
+        if (seen || nsubs >= (int)(sizeof subs / sizeof subs[0]))
+            continue;
+        subs[nsubs++] = m->subscriber;
+    }
+    for (int s = 0; s < nsubs; s++) {
+        if (subscriber_live(rt, subs[s])) {
+            int n = igmp_engine_keep_subscriber(rt->eng, subs[s]);
+            if (n > 0)
+                log_member(rt, "member-kept", "pod-local", subs[s], n);
+            continue;
+        }
+        total += drop_subscriber(rt, subs[s], reason);
+    }
+    return total;
+}
+
+static void sweep_missing_pods(igmp_runtime *rt) {
+    uint32_t subs[64];
+    int nsubs = 0;
+    if (!rt->use_kube || !rt->pods.full_list_ok)
+        return;
+    for (int i = 0; i < IGMP_MAX_MEMBERS; i++) {
+        igmp_member *m = &rt->eng->members[i];
+        int seen = 0;
+        if (!m->used || m->subscriber == 0)
+            continue;
+        if (m->pod_uid[0] && igmp_pods_by_uid(&rt->pods, m->pod_uid))
+            continue;
+        for (int s = 0; s < nsubs; s++)
+            if (subs[s] == m->subscriber)
+                seen = 1;
+        if (seen || nsubs >= (int)(sizeof subs / sizeof subs[0]))
+            continue;
+        subs[nsubs++] = m->subscriber;
+    }
+    for (int s = 0; s < nsubs; s++) {
+        if (subscriber_live(rt, subs[s]))
+            continue;
+        drop_subscriber(rt, subs[s], "pod-list-absent");
+    }
+}
+
 static void hold_unbound(igmp_runtime *rt, uint32_t src, const uint8_t *frame, size_t len, int link,
                          uint32_t ifindex, uint32_t ifgen) {
     igmp_rt_extra *x = extra(rt);
@@ -246,17 +404,11 @@ int igmp_runtime_on_frame(igmp_runtime *rt, const uint8_t *frame, size_t len, in
     if (is_report)
         pod = pod_for_src(rt, msg.src);
     if (is_report && rt->use_kube && rt->pods.full_list_ok && !pod) {
-        char ns[64];
         /* The watch can miss a restarted pod's address. A fib LOCAL route in
          * some other network namespace is that pod running on this node. */
-        if (igmp_netns_for_local_ip(msg.src, ns, sizeof ns) == 0) {
-            igmp_rt_extra *x = extra(rt);
-            int seen = 0;
-            for (int i = 0; i < x->nlocal_seen; i++)
-                if (x->local_seen[i] == msg.src)
-                    seen = 1;
-            if (!seen && x->nlocal_seen < 32)
-                x->local_seen[x->nlocal_seen++] = msg.src;
+        if (pod_namespace_live(msg.src)) {
+            int seen = seen_local(rt, msg.src);
+            note_local(rt, msg.src);
             if (!seen && rt->log_json) {
                 char ip[32];
                 igmp_ip_fmt(msg.src, ip, sizeof ip);
@@ -379,7 +531,7 @@ void igmp_runtime_tick(igmp_runtime *rt) {
     int after = igmp_engine_joined_count(rt->eng);
     if (after < before) {
         rt->cleanups += (uint64_t)(before - after);
-        snprintf(rt->cleanup_reason, sizeof rt->cleanup_reason, "timer");
+        log_member(rt, "member-deleted", "timer", 0, before - after);
         rt->gen++;
     }
 }
@@ -395,6 +547,10 @@ int igmp_runtime_pod_upsert(igmp_runtime *rt, const char *uid, const char *name,
         rt->restarts_ignored++;
     if (ip && !deleting)
         igmp_engine_bind_pod(rt->eng, ip, uid, node);
+    /* Same pod object, new address. The previous address is the inactive one.
+     * Groups learned from the new address stay bound above. */
+    if (old_ip && ip && old_ip != ip && !igmp_pods_by_ip(&rt->pods, old_ip))
+        drop_subscriber(rt, old_ip, "pod-ip-changed");
     if (ip && !deleting && pod_on_this_node(rt, node)) {
         if (ip != old_ip && rt->log_json) {
             char ipb[32];
@@ -412,14 +568,8 @@ int igmp_runtime_pod_upsert(igmp_runtime *rt, const char *uid, const char *name,
 int igmp_runtime_pod_delete(igmp_runtime *rt, const char *uid) {
     if (!igmp_pods_delete(&rt->pods, uid))
         return 0;
-    int n = igmp_engine_pod_gone(rt->eng, uid, rt->now_ms);
-    if (n > 0) {
-        rt->cleanups += (uint64_t)n;
-        snprintf(rt->cleanup_reason, sizeof rt->cleanup_reason, "pod-deleted");
-        rt->gen++;
-        logj(rt, "info", "pod-deleted");
-    }
-    return n;
+    refresh_local_seen(rt);
+    return drop_uid(rt, uid, "pod-deleted");
 }
 
 void igmp_runtime_pods_begin(igmp_runtime *rt) {
@@ -428,18 +578,16 @@ void igmp_runtime_pods_begin(igmp_runtime *rt) {
 
 static void end_cb(void *user, const char *uid) {
     igmp_runtime *rt = user;
-    int n = igmp_engine_pod_gone(rt->eng, uid, rt->now_ms);
-    if (n > 0) {
-        rt->cleanups += (uint64_t)n;
-        snprintf(rt->cleanup_reason, sizeof rt->cleanup_reason, "pod-list-absent");
-        rt->gen++;
-    }
+    drop_uid(rt, uid, "pod-list-absent");
 }
 
 int igmp_runtime_pods_end(igmp_runtime *rt) {
+    refresh_local_seen(rt);
     int n = igmp_pods_end_list(&rt->pods, end_cb, rt);
     if (n < 0)
         logj(rt, "warn", "pod-list-skipped-api-down");
+    else
+        sweep_missing_pods(rt);
     return n;
 }
 
@@ -465,7 +613,7 @@ uint32_t igmp_runtime_observe_iface(igmp_runtime *rt, uint32_t ifindex, const ch
             int n = igmp_engine_retire_ifgen(rt->eng, ifindex, old);
             if (n > 0) {
                 rt->cleanups += (uint64_t)n;
-                snprintf(rt->cleanup_reason, sizeof rt->cleanup_reason, "iface-down");
+                log_member(rt, "member-deleted", "iface-down", 0, n);
                 rt->gen++;
             }
         }
@@ -491,7 +639,7 @@ uint32_t igmp_runtime_observe_iface(igmp_runtime *rt, uint32_t ifindex, const ch
         int n = igmp_engine_retire_ifgen(rt->eng, ifindex, old);
         if (n > 0) {
             rt->cleanups += (uint64_t)n;
-            snprintf(rt->cleanup_reason, sizeof rt->cleanup_reason, "ifindex-reuse");
+            log_member(rt, "member-deleted", "ifindex-reuse", 0, n);
             rt->gen++;
         }
     }
@@ -590,34 +738,35 @@ static void apply_ledger_marks(igmp_runtime *rt, igmp_actual *rows, int n) {
  * by a restart that never sent a leave. Owning it lets reconcile delete that
  * address without adopting it as a membership. A still-running pod is left
  * unmanaged unless the engine already learned its report. */
-static int local_pod_live(const igmp_runtime *rt, uint32_t ip) {
-    const igmp_pod *pod;
-    if (ip == 0)
-        return 0;
-    pod = igmp_pods_by_ip(&rt->pods, ip);
-    if (!pod || pod->deleting)
-        return 0;
-    if (rt->node_name[0] && pod->node[0] && strcmp(pod->node, rt->node_name) != 0)
-        return 0;
-    return 1;
-}
-
 static void claim_departed_locals(igmp_runtime *rt, igmp_actual *rows, int n) {
-    int claimed = 0;
+    uint32_t ips[64];
+    int counts[64];
+    int nips = 0;
     if (!rt->use_kube || !rt->pods.full_list_ok)
         return;
+    refresh_local_seen(rt);
     for (int i = 0; i < n; i++) {
+        int slot = -1;
         if (rows[i].remote || rows[i].addr == 0 || rows[i].managed)
             continue;
-        if (local_pod_live(rt, rows[i].addr))
+        if (subscriber_live(rt, rows[i].addr))
             continue;
         rows[i].managed = 1;
-        claimed++;
+        for (int k = 0; k < nips; k++)
+            if (ips[k] == rows[i].addr)
+                slot = k;
+        if (slot >= 0) {
+            counts[slot]++;
+            continue;
+        }
+        if (nips >= (int)(sizeof ips / sizeof ips[0]))
+            continue;
+        ips[nips] = rows[i].addr;
+        counts[nips] = 1;
+        nips++;
     }
-    if (claimed > 0 && rt->log_json)
-        fprintf(stderr,
-                "{\"level\":\"info\",\"msg\":\"departed-local\",\"count\":%d,\"node\":\"%s\"}\n",
-                claimed, rt->node_name);
+    for (int k = 0; k < nips; k++)
+        log_member(rt, "member-deleted", "departed-local", ips[k], counts[k]);
 }
 
 static int actual_has_local(const igmp_actual *actual, int n, uint32_t group, uint32_t addr) {

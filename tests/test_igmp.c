@@ -302,6 +302,19 @@ static void test_malformed_and_dedup(void) {
     expect(igmp_engine_on_frame(&E, frame, n, IGMP_LINK_ETHERNET, 9, 1, 120) == 1, "dup iface");
     expect(igmp_engine_joined_count(&E) == before, "dedup no extra member");
     expect(igmp_engine_on_frame(&E, frame, n, IGMP_LINK_ETHERNET, 1, 1, 200) == 0, "later report accepted");
+    igmp_record ex;
+    memset(&ex, 0, sizeof ex);
+    ex.type = IGMP_REC_IS_EXCLUDE;
+    ex.group = g;
+    n = v3_report(frame, ip4("10.8.0.1"), &ex, 1);
+    expect(igmp_engine_on_frame(&E, frame, n, IGMP_LINK_ETHERNET, 1, 1, 300) == 0, "is_ex joins");
+    expect(igmp_engine_on_frame(&E, frame, n, IGMP_LINK_ETHERNET, 1, 1, 320) == 1, "second is_ex is deduped");
+    expect(igmp_engine_joined_count(&E) == before, "dedup leaves the is_ex membership");
+    igmp_engine_bind_pod(&E, ip4("10.8.0.1"), "pod-a", "n1");
+    expect(igmp_engine_pod_gone(&E, "pod-a", 330) == 1, "cleanup removed the is_ex join");
+    expect(igmp_engine_on_frame(&E, frame, n, IGMP_LINK_ETHERNET, 1, 1, 340) == 0,
+           "is_ex inside the dedup window restores the group");
+    expect(igmp_engine_find(&E, g, ip4("10.8.0.1"), 1, NULL) == 1, "restored membership");
     n = v2_report(frame, ip4("10.8.0.1"), ip4("224.0.0.1"));
     expect(igmp_engine_on_frame(&E, frame, n, IGMP_LINK_ETHERNET, 1, 1, 300) == -1, "link local ignored");
 }

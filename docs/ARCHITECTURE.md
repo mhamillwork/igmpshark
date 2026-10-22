@@ -26,7 +26,7 @@ Reference counts are per group and remote node IP. Removing one pod does not rem
 
 On startup the process reloads its own snapshot into the engine with fresh membership deadlines and does not count those as new joins. Deletes wait for `--startup-grace-ms` (default 15 s) and, when `--kube` is set, for one successful pod list. Adds are allowed immediately, so a Cilium restart that emptied the maps is repaired without waiting.
 
-A container restart that keeps the pod UID is recorded and ignored. A new UID on a reused IP is bound onto existing and new reports. A delayed delete for the old UID does not remove the new one.
+A container restart that keeps the pod UID is recorded and ignored. A new UID on a reused IP is bound onto existing and new reports. A delayed delete for the old UID does not remove the new one. A list that omits a pod whose address still has a network namespace on this node does not drop that subscriber. The previous address is the one removed when the pod IP changes. Every such removal is logged as `member-deleted` with a `reason`.
 
 Interface disappearance or a name change at the same ifindex retires the old interface generation. Later reports on the new generation create new memberships.
 

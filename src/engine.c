@@ -278,6 +278,37 @@ static int apply_v3_record(igmp_engine *e, const igmp_record *rec, uint32_t src,
     return 0;
 }
 
+static int member_current(const igmp_engine *e, uint32_t group, uint32_t src) {
+    for (int i = 0; i < IGMP_MAX_MEMBERS; i++) {
+        const igmp_member *m = &e->members[i];
+        if (m->used && m->joined && m->lmq_left == 0 && m->group == group && m->subscriber == src)
+            return 1;
+    }
+    return 0;
+}
+
+/* 1 when the frame would create or restore a joined group. A second copy of
+ * a report that is already joined can be dropped. A copy that arrives after
+ * cleanup removed the slot has to be applied, or the group stays gone. */
+static int report_needs_apply(const igmp_engine *e, const igmp_message *msg) {
+    if (msg->kind == IGMP_KIND_V1_REPORT || msg->kind == IGMP_KIND_V2_REPORT)
+        return !member_current(e, msg->group, msg->src);
+    if (msg->kind != IGMP_KIND_V3_REPORT)
+        return 0;
+    for (int i = 0; i < msg->n_records; i++) {
+        const igmp_record *rec = &msg->records[i];
+        int leave = (rec->type == IGMP_REC_IS_INCLUDE || rec->type == IGMP_REC_TO_INCLUDE) &&
+                    rec->n_sources == 0;
+        if (leave || rec->type < 1 || rec->type > 6)
+            continue;
+        if (!igmp_group_routable(rec->group))
+            continue;
+        if (!member_current(e, rec->group, msg->src))
+            return 1;
+    }
+    return 0;
+}
+
 static int dedup_hit(igmp_engine *e, uint32_t src, const uint8_t *dedup, size_t dedup_len,
                      int64_t now_ms) {
     if (!dedup || dedup_len == 0 || e->cfg.dedup_window_ms <= 0)
@@ -287,14 +318,12 @@ static int dedup_hit(igmp_engine *e, uint32_t src, const uint8_t *dedup, size_t 
         h = (h ^ dedup[i]) * 16777619u;
     h ^= src;
     unsigned slot = h % IGMP_DEDUP_SLOTS;
-    if (e->dedup_src[slot] == src && e->dedup_hash[slot] == (uint8_t)h &&
+    if (e->dedup_src[slot] == src && e->dedup_hash[slot] == h &&
         now_ms >= e->dedup_time[slot] &&
-        now_ms - e->dedup_time[slot] <= e->cfg.dedup_window_ms) {
-        e->dedup_drops++;
+        now_ms - e->dedup_time[slot] <= e->cfg.dedup_window_ms)
         return 1;
-    }
     e->dedup_src[slot] = src;
-    e->dedup_hash[slot] = (uint8_t)h;
+    e->dedup_hash[slot] = h;
     e->dedup_time[slot] = now_ms;
     return 0;
 }
@@ -365,8 +394,10 @@ int igmp_engine_on_message(igmp_engine *e, const igmp_message *msg,
         e->malformed++;
         return -1;
     }
-    if (dedup_hit(e, msg->src, dedup, dedup_len, now_ms))
+    if (dedup_hit(e, msg->src, dedup, dedup_len, now_ms) && !report_needs_apply(e, msg)) {
+        e->dedup_drops++;
         return 1;
+    }
     if (msg->kind == IGMP_KIND_QUERY) {
         note_querier(e, msg->src, now_ms);
         if (msg->group != 0) {
@@ -495,6 +526,35 @@ int igmp_engine_pod_gone(igmp_engine *e, const char *pod_uid, int64_t now_ms) {
             free_slot(e, m);
             n++;
         }
+    }
+    return n;
+}
+
+int igmp_engine_subscriber_gone(igmp_engine *e, uint32_t subscriber, int64_t now_ms) {
+    (void)now_ms;
+    if (subscriber == 0)
+        return 0;
+    int n = 0;
+    for (int i = 0; i < IGMP_MAX_MEMBERS; i++) {
+        igmp_member *m = &e->members[i];
+        if (!m->used || m->subscriber != subscriber)
+            continue;
+        free_slot(e, m);
+        n++;
+    }
+    return n;
+}
+
+int igmp_engine_keep_subscriber(igmp_engine *e, uint32_t subscriber) {
+    if (subscriber == 0)
+        return 0;
+    int n = 0;
+    for (int i = 0; i < IGMP_MAX_MEMBERS; i++) {
+        igmp_member *m = &e->members[i];
+        if (!m->used || m->subscriber != subscriber || !m->pod_uid[0])
+            continue;
+        m->pod_uid[0] = 0;
+        n++;
     }
     return n;
 }

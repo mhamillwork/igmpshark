@@ -84,4 +84,8 @@ uint32_t igmp_runtime_observe_iface(igmp_runtime *rt, uint32_t ifindex, const ch
 
 int igmp_metrics_render(const igmp_runtime *rt, char *buf, size_t len);
 
+/* Optional stand-in for the pod-namespace lookup. NULL restores the fib
+ * trie walk. A non-zero return means that address is a running pod. */
+void igmp_runtime_set_pod_local_fn(int (*fn)(uint32_t ip));
+
 #endif

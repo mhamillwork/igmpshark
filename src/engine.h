@@ -67,7 +67,7 @@ typedef struct igmp_engine {
     uint64_t limit_drops;
     uint64_t queries_sent;
     uint64_t queries_seen;
-    uint8_t dedup_hash[IGMP_DEDUP_SLOTS];
+    uint32_t dedup_hash[IGMP_DEDUP_SLOTS];
     int64_t dedup_time[IGMP_DEDUP_SLOTS];
     uint32_t dedup_src[IGMP_DEDUP_SLOTS];
     igmp_query_out pending_q[32];
@@ -101,6 +101,12 @@ void igmp_engine_tick(igmp_engine *e, int64_t now_ms);
 int igmp_engine_bind_pod(igmp_engine *e, uint32_t subscriber, const char *pod_uid,
                          const char *node_name);
 int igmp_engine_pod_gone(igmp_engine *e, const char *pod_uid, int64_t now_ms);
+/* Drop every membership sourced from this address. Used when that address
+ * is no longer a pod. Returns how many slots were freed. */
+int igmp_engine_subscriber_gone(igmp_engine *e, uint32_t subscriber, int64_t now_ms);
+/* Leave the memberships in place but clear the pod uid, so a later list
+ * cannot treat a still-running address as the departed pod. */
+int igmp_engine_keep_subscriber(igmp_engine *e, uint32_t subscriber);
 int igmp_engine_retire_ifgen(igmp_engine *e, uint32_t ifindex, uint32_t old_gen);
 
 int igmp_engine_joined_count(const igmp_engine *e);

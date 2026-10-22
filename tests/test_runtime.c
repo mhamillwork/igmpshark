@@ -1119,6 +1119,73 @@ static void test_list_meta_ignores_pod_version(void) {
     expect(strcmp(rv, "9") == 0 && cont[0] == 0, "missing continue is empty");
 }
 
+static int pod_155_live(uint32_t ip) {
+    return ip == ip4("10.42.7.155");
+}
+
+static void test_restart_ip_survives_cleanup(void) {
+    char *dir = tmpdir();
+    char state[512];
+    igmp_runtime *rt;
+    uint8_t frame[128];
+    uint32_t g = ip4("239.192.14.12");
+    uint32_t old = ip4("10.42.7.50");
+    uint32_t neu = ip4("10.42.7.155");
+    size_t n;
+    snprintf(state, sizeof state, "%s/map", dir);
+    rt = make_rt(dir, "ws-g3-160", "10.42.7.110", 0);
+    rt->use_kube = 1;
+    igmp_runtime_pods_begin(rt);
+    igmp_runtime_pod_upsert(rt, "app", "mcast", "ws-g3-160", old, 0, 0, 1);
+    expect(igmp_runtime_pods_end(rt) == 0, "old pod listed");
+    n = v2_report(frame, old, g);
+    expect(igmp_runtime_on_frame(rt, frame, n, IGMP_LINK_ETHERNET, 3, 1) == 0, "old ip joined");
+    igmp_runtime_set_pod_local_fn(pod_155_live);
+    igmp_runtime_pod_upsert(rt, "app", "mcast", "ws-g3-160", neu, 1, 0, 1);
+    expect(igmp_engine_find(rt->eng, g, old, 3, NULL) == 0, "previous address is the one removed");
+    expect(strcmp(rt->cleanup_reason, "pod-ip-changed") == 0, "ip change names the delete reason");
+    n = v2_report(frame, neu, g);
+    expect(igmp_runtime_on_frame(rt, frame, n, IGMP_LINK_ETHERNET, 3, 1) == 0, "new ip joined");
+    n = v2_report(frame, neu, ip4("239.192.14.13"));
+    expect(igmp_runtime_on_frame(rt, frame, n, IGMP_LINK_ETHERNET, 3, 1) == 0, "second group joined");
+    expect(igmp_engine_joined_count(rt->eng) == 2, "both groups from the new ip");
+    igmp_runtime_pods_begin(rt);
+    igmp_runtime_pod_upsert(rt, "other", "other", "ws-g3-160", ip4("10.42.7.9"), 0, 0, 1);
+    expect(igmp_runtime_pods_end(rt) == 1, "list missed the restarted pod");
+    expect(igmp_engine_find(rt->eng, g, neu, 3, NULL) == 1, "new ip group stays after the list");
+    expect(igmp_engine_find(rt->eng, ip4("239.192.14.13"), neu, 3, NULL) == 1,
+           "second group stays");
+    igmp_runtime_set_pod_local_fn(NULL);
+    igmp_runtime_pods_begin(rt);
+    igmp_runtime_pod_upsert(rt, "other", "other", "ws-g3-160", ip4("10.42.7.9"), 0, 0, 1);
+    expect(igmp_runtime_pods_end(rt) == 0, "pod already absent from the table");
+    expect(igmp_engine_find(rt->eng, g, neu, 3, NULL) == 0, "gone once the namespace is gone");
+    expect(strcmp(rt->cleanup_reason, "pod-list-absent") == 0, "list absence names the delete reason");
+
+    {
+        FILE *fp = fopen(state, "w");
+        fprintf(fp, "239.192.14.12 10.42.7.50 0 0\n");
+        fprintf(fp, "239.192.14.12 10.42.7.155 0 0\n");
+        fclose(fp);
+    }
+    free(rt->backend);
+    igmp_runtime_free(rt);
+    rt = make_rt(dir, "ws-g3-160", "10.42.7.110", 0);
+    attach_file(rt, state, 0);
+    rt->use_kube = 1;
+    igmp_runtime_set_pod_local_fn(pod_155_live);
+    igmp_runtime_pods_begin(rt);
+    igmp_runtime_pod_upsert(rt, "other", "other", "ws-g3-160", ip4("10.42.7.9"), 0, 0, 1);
+    expect(igmp_runtime_pods_end(rt) == 0, "list without the new ip");
+    igmp_runtime_reconcile(rt);
+    expect(has_op(rt, IGMP_OP_LOCAL_DEL, old), "inactive address is still removed");
+    expect(!has_op(rt, IGMP_OP_LOCAL_DEL, neu), "running new address is not cleared");
+    igmp_runtime_set_pod_local_fn(NULL);
+    free(rt->backend);
+    igmp_runtime_free(rt);
+    free(dir);
+}
+
 static void test_unsubscribe_drops_stuck_add(void) {
     char *dir = tmpdir();
     igmp_snap_mem mem;
@@ -1195,6 +1262,7 @@ int main(void) {
     test_new_pod_ip_replays_report();
     test_pod_ipv4_not_host_or_podips_key();
     test_list_meta_ignores_pod_version();
+    test_restart_ip_survives_cleanup();
     test_unsubscribe_drops_stuck_add();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
