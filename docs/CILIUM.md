@@ -37,4 +37,6 @@ Filter mode and source lists follow RFC 3376 inside the engine. Cilium forwardin
 
 ## Cleanup this does not claim
 
+After the pod list for this node has completed, a Local Endpoint whose address is not a current pod on this node is deleted. That is the previous pod IP left behind when a restart never sent a leave. The address that still belongs to a running pod is kept, so the group is not removed out from under it. A local row is not adopted as an igmpshark membership just because Cilium still lists it.
+
 A remote-node delete is not a fix for a local entry leaked by a crashed pod. The local delete is the pod-IP key. The 1.19 guide shows `subscriber delete` taking the same group and address pair used for remote nodes. Whether 1.19.2 and 1.19.3 still delete a non-remote pod key with that command was not re-checked on a live agent. If they refuse it, local crash cleanup needs an upstream delete-by-endpoint API, which these docs do not provide.

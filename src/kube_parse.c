@@ -146,6 +146,42 @@ static const char *end_object(const char *p, const char *limit) {
     return NULL;
 }
 
+static int string_after_key(const char *keyat, const char *end, char *out, size_t cap);
+
+int kube_parse_list_meta(const char *json, char *rv, size_t rv_cap, char *cont, size_t cont_cap) {
+    const char *end;
+    const char *items;
+    const char *meta;
+    const char *obj;
+    const char *obj_end;
+    const char *rvk;
+    const char *ck;
+    if (rv && rv_cap)
+        rv[0] = 0;
+    if (cont && cont_cap)
+        cont[0] = 0;
+    if (!json)
+        return -1;
+    end = json + strlen(json);
+    items = find_key(json, end, "\"items\"");
+    meta = find_key(json, end, "\"metadata\"");
+    if (!meta || (items && meta > items))
+        return -1;
+    obj = strchr(meta, '{');
+    if (!obj || obj >= end)
+        return -1;
+    obj_end = end_object(obj, end);
+    if (!obj_end)
+        return -1;
+    rvk = find_key(obj, obj_end, "\"resourceVersion\"");
+    if (rvk && rv && rv_cap && string_after_key(rvk, obj_end, rv, rv_cap) != 0)
+        rv[0] = 0;
+    ck = find_key(obj, obj_end, "\"continue\"");
+    if (ck && cont && cont_cap && string_after_key(ck, obj_end, cont, cont_cap) != 0)
+        cont[0] = 0;
+    return 0;
+}
+
 int kube_parse_pod_list(const char *json, int (*cb)(void *user, const kube_event *ev), void *user) {
     if (!json || !cb)
         return -1;

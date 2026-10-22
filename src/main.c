@@ -917,7 +917,7 @@ int main(int argc, char **argv) {
         }
     }
     if (use_kube) {
-        if (kube_client_start(&kube) != 0)
+        if (kube_client_start(&kube, node) != 0)
             log_msg("warn", "kube-watch-not-started");
     }
     next_reconcile = now;

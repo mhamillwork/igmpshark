@@ -24,7 +24,8 @@ typedef struct kube_event {
     int deleting;
 } kube_event;
 
-int kube_client_start(kube_client **out);
+/* node_name limits the list and watch to spec.nodeName. Empty lists every pod. */
+int kube_client_start(kube_client **out, const char *node_name);
 void kube_client_stop(kube_client *k);
 int kube_client_poll(kube_client *k, kube_event *ev);
 uint64_t kube_client_drops(const kube_client *k);

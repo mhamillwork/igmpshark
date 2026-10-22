@@ -449,6 +449,40 @@ static void apply_ledger_marks(igmp_runtime *rt, igmp_actual *rows, int n) {
     }
 }
 
+/* A Local Endpoint whose address is not a current pod on this node was left
+ * by a restart that never sent a leave. Owning it lets reconcile delete that
+ * address without adopting it as a membership. A still-running pod is left
+ * unmanaged unless the engine already learned its report. */
+static int local_pod_live(const igmp_runtime *rt, uint32_t ip) {
+    const igmp_pod *pod;
+    if (ip == 0)
+        return 0;
+    pod = igmp_pods_by_ip(&rt->pods, ip);
+    if (!pod || pod->deleting)
+        return 0;
+    if (rt->node_name[0] && pod->node[0] && strcmp(pod->node, rt->node_name) != 0)
+        return 0;
+    return 1;
+}
+
+static void claim_departed_locals(igmp_runtime *rt, igmp_actual *rows, int n) {
+    int claimed = 0;
+    if (!rt->use_kube || !rt->pods.full_list_ok)
+        return;
+    for (int i = 0; i < n; i++) {
+        if (rows[i].remote || rows[i].addr == 0 || rows[i].managed)
+            continue;
+        if (local_pod_live(rt, rows[i].addr))
+            continue;
+        rows[i].managed = 1;
+        claimed++;
+    }
+    if (claimed > 0 && rt->log_json)
+        fprintf(stderr,
+                "{\"level\":\"info\",\"msg\":\"departed-local\",\"count\":%d,\"node\":\"%s\"}\n",
+                claimed, rt->node_name);
+}
+
 static int actual_has_local(const igmp_actual *actual, int n, uint32_t group, uint32_t addr) {
     for (int i = 0; i < n; i++)
         if (actual[i].group == group && !actual[i].remote && actual[i].addr == addr)
@@ -615,6 +649,7 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
             return -1;
         }
         apply_ledger_marks(rt, actual, nactual);
+        claim_departed_locals(rt, actual, nactual);
         loaded = 1;
     }
     int nlocal = fill_local(rt, local, 4096);
@@ -667,6 +702,7 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
             return -1;
         }
         apply_ledger_marks(rt, actual, nactual);
+        claim_departed_locals(rt, actual, nactual);
     }
     int allow_delete = rt->now_ms >= rt->eng->started_ms + rt->eng->cfg.startup_grace_ms;
     if (rt->use_kube && !rt->pods.full_list_ok)

@@ -3,10 +3,17 @@
 
 #include "kube.h"
 
+#include <stddef.h>
+
 /* PodList items from the apiserver omit kind and apiVersion. Walk the items
  * array itself. Calls cb once per pod. cb returning non-zero stops the walk.
  * Returns the number of pods delivered. */
 int kube_parse_pod_list(const char *json, int (*cb)(void *user, const kube_event *ev), void *user);
+
+/* List metadata only, before the items array. Pod resourceVersions are ignored.
+ * rv and cont are cleared when the key is absent. Returns 0 when metadata
+ * was found. */
+int kube_parse_list_meta(const char *json, char *rv, size_t rv_cap, char *cont, size_t cont_cap);
 
 /* One watch line: {"type":"ADDED|MODIFIED|DELETED","object":{...}}.
  * Returns 1 when ev was filled. */

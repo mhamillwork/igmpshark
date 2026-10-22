@@ -15,7 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define KUBE_Q 256
+#define KUBE_Q 2048
 
 struct kube_client {
     pthread_t thread;
@@ -89,24 +89,31 @@ static int kube_setup_easy(kube_client *k, CURL *c, const char *url, buf *body, 
     return 0;
 }
 
-static void push_ev(kube_client *k, const kube_event *ev) {
-    pthread_mutex_lock(&k->mu);
-    if (k->qn >= KUBE_Q) {
-        k->drops++;
-        k->stop = k->stop;
+/* Wait for a slot. Dropping a list event and then treating the page as
+ * complete deletes every pod the queue did not hold. */
+static int push_ev(kube_client *k, const kube_event *ev) {
+    for (;;) {
+        pthread_mutex_lock(&k->mu);
+        if (k->stop) {
+            pthread_mutex_unlock(&k->mu);
+            return -1;
+        }
+        if (k->qn < KUBE_Q) {
+            k->q[(k->qh + k->qn) % KUBE_Q] = *ev;
+            k->qn++;
+            pthread_mutex_unlock(&k->mu);
+            return 0;
+        }
         pthread_mutex_unlock(&k->mu);
-        return;
+        usleep(20000);
     }
-    k->q[(k->qh + k->qn) % KUBE_Q] = *ev;
-    k->qn++;
-    pthread_mutex_unlock(&k->mu);
 }
 
-static void push_kind(kube_client *k, int kind) {
+static int push_kind(kube_client *k, int kind) {
     kube_event ev;
     memset(&ev, 0, sizeof ev);
     ev.kind = kind;
-    push_ev(k, &ev);
+    return push_ev(k, &ev);
 }
 
 static const char *skip_ws(const char *p) {
@@ -202,13 +209,88 @@ static int b64_encode(const char *in, size_t len, char *out, size_t cap) {
     return (int)n;
 }
 
+struct scan_ctx {
+    kube_client *k;
+    int drops;
+};
+
 static int push_parsed(void *user, const kube_event *ev) {
-    push_ev(user, ev);
+    struct scan_ctx *s = user;
+    if (push_ev(s->k, ev) != 0)
+        s->drops++;
     return 0;
 }
 
-static void scan_items(kube_client *k, const char *json) {
-    kube_parse_pod_list(json, push_parsed, k);
+static int scan_items(kube_client *k, const char *json) {
+    struct scan_ctx s;
+    s.k = k;
+    s.drops = 0;
+    kube_parse_pod_list(json, push_parsed, &s);
+    return s.drops;
+}
+
+static int url_encode(const char *in, char *out, size_t cap) {
+    static const char hex[] = "0123456789ABCDEF";
+    size_t n = 0;
+    if (!in || !out || cap == 0)
+        return -1;
+    for (const unsigned char *p = (const unsigned char *)in; *p; p++) {
+        int safe = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+                   (*p >= '0' && *p <= '9') || *p == '-' || *p == '_' || *p == '.' || *p == '~';
+        if (safe) {
+            if (n + 1 >= cap)
+                return -1;
+            out[n++] = (char)*p;
+        } else {
+            if (n + 3 >= cap)
+                return -1;
+            out[n++] = '%';
+            out[n++] = hex[*p >> 4];
+            out[n++] = hex[*p & 15];
+        }
+    }
+    out[n] = 0;
+    return 0;
+}
+
+static int build_pod_url(char *url, size_t cap, const kube_client *k, int watch, const char *rv,
+                         const char *cont) {
+    char enc[3072];
+    int n = snprintf(url, cap, "https://%s:%s/api/v1/pods?", k->host, k->port);
+    if (n < 0 || (size_t)n >= cap)
+        return -1;
+    if (k->node_filter[0]) {
+        char raw[160];
+        snprintf(raw, sizeof raw, "spec.nodeName=%s", k->node_filter);
+        if (url_encode(raw, enc, sizeof enc) != 0)
+            return -1;
+        int m = snprintf(url + n, cap - (size_t)n, "fieldSelector=%s&", enc);
+        if (m < 0 || (size_t)m >= cap - (size_t)n)
+            return -1;
+        n += m;
+    }
+    if (watch) {
+        if (url_encode(rv && rv[0] ? rv : "0", enc, sizeof enc) != 0)
+            return -1;
+        int m = snprintf(url + n, cap - (size_t)n, "watch=1&timeoutSeconds=25&resourceVersion=%s", enc);
+        if (m < 0 || (size_t)m >= cap - (size_t)n)
+            return -1;
+        return 0;
+    }
+    if (cont && cont[0]) {
+        if (url_encode(cont, enc, sizeof enc) != 0)
+            return -1;
+        int m = snprintf(url + n, cap - (size_t)n, "limit=500&continue=%s", enc);
+        if (m < 0 || (size_t)m >= cap - (size_t)n)
+            return -1;
+        return 0;
+    }
+    if (url_encode(rv && rv[0] ? rv : "0", enc, sizeof enc) != 0)
+        return -1;
+    int m = snprintf(url + n, cap - (size_t)n, "limit=500&resourceVersion=%s", enc);
+    if (m < 0 || (size_t)m >= cap - (size_t)n)
+        return -1;
+    return 0;
 }
 
 static void scan_watch_line(kube_client *k, const char *line) {
@@ -243,44 +325,79 @@ static void *kube_thread(void *arg) {
     kube_client *k = arg;
     char rv[128] = "0";
     while (!k->stop) {
-        char url[512];
-        snprintf(url, sizeof url, "https://%s:%s/api/v1/pods?limit=500&resourceVersion=%s", k->host,
-                 k->port, rv);
-        buf body;
-        long code = 0;
-        if (http_get(k, url, &code, &body, 40) != 0 || code != 200) {
-            push_kind(k, KUBE_EV_API_DOWN);
+        char list_rv[128] = "";
+        char cont[2048] = "";
+        int began = 0;
+        int failed = 0;
+        int drops = 0;
+        for (int page = 0; page < 64 && !k->stop; page++) {
+            char url[4096];
+            buf body;
+            long code = 0;
+            char page_rv[128];
+            char page_cont[2048];
+            memset(&body, 0, sizeof body);
+            page_rv[0] = 0;
+            page_cont[0] = 0;
+            if (build_pod_url(url, sizeof url, k, 0, page == 0 ? rv : "", cont) != 0 ||
+                http_get(k, url, &code, &body, 40) != 0 || code != 200) {
+                if (code == 410)
+                    snprintf(rv, sizeof rv, "0");
+                failed = 1;
+                free(body.data);
+                break;
+            }
+            kube_parse_list_meta(body.data ? body.data : "", page_rv, sizeof page_rv, page_cont,
+                                 sizeof page_cont);
+            if (list_rv[0] == 0 && page_rv[0])
+                snprintf(list_rv, sizeof list_rv, "%s", page_rv);
+            if (!began) {
+                if (push_kind(k, KUBE_EV_API_UP) != 0 || push_kind(k, KUBE_EV_BEGIN) != 0) {
+                    failed = 1;
+                    free(body.data);
+                    break;
+                }
+                began = 1;
+            }
+            drops += scan_items(k, body.data ? body.data : "");
             free(body.data);
+            if (drops > 0) {
+                failed = 1;
+                break;
+            }
+            if (!page_cont[0]) {
+                cont[0] = 0;
+                break;
+            }
+            snprintf(cont, sizeof cont, "%s", page_cont);
+            if (page == 63)
+                failed = 1;
+        }
+        if (began && !failed && cont[0] == 0) {
+            if (push_kind(k, KUBE_EV_END) != 0)
+                failed = 1;
+            else if (list_rv[0])
+                snprintf(rv, sizeof rv, "%s", list_rv);
+        } else {
+            push_kind(k, KUBE_EV_API_DOWN);
             for (int i = 0; i < 20 && !k->stop; i++)
                 usleep(100000);
             continue;
         }
-        const char *rvpos = strstr(body.data ? body.data : "", "\"resourceVersion\"");
-        if (rvpos) {
-            const char *p = strchr(rvpos, ':');
-            char tmp[128];
-            if (p) {
-                p = skip_ws(p + 1);
-                if (parse_string(&p, tmp, sizeof tmp) == 0)
-                    snprintf(rv, sizeof rv, "%s", tmp);
-            }
-        }
-        push_kind(k, KUBE_EV_API_UP);
-        push_kind(k, KUBE_EV_BEGIN);
-        scan_items(k, body.data ? body.data : "");
-        push_kind(k, KUBE_EV_END);
-        free(body.data);
-        snprintf(url, sizeof url,
-                 "https://%s:%s/api/v1/pods?watch=1&resourceVersion=%s&timeoutSeconds=25", k->host,
-                 k->port, rv);
-        CURL *c = curl_easy_init();
+        if (failed || k->stop)
+            continue;
+        char url[4096];
+        CURL *c;
+        buf watch;
+        long wcode = 0;
+        if (build_pod_url(url, sizeof url, k, 1, rv, "") != 0)
+            continue;
+        c = curl_easy_init();
         if (!c)
             continue;
-        buf watch;
         memset(&watch, 0, sizeof watch);
         kube_setup_easy(k, c, url, &watch, 40);
         curl_easy_perform(c);
-        long wcode = 0;
         curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &wcode);
         curl_easy_cleanup(c);
         if (wcode == 410) {
@@ -316,10 +433,12 @@ static int load_identity(kube_client *k) {
     return 0;
 }
 
-int kube_client_start(kube_client **out) {
+int kube_client_start(kube_client **out, const char *node_name) {
     kube_client *k = calloc(1, sizeof *k);
     if (!k)
         return -1;
+    if (node_name && node_name[0])
+        snprintf(k->node_filter, sizeof k->node_filter, "%s", node_name);
     if (load_identity(k) != 0) {
         free(k);
         return -1;

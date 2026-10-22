@@ -1003,6 +1003,65 @@ static void test_orphan_remote_without_ledger(void) {
     free(dir);
 }
 
+static void test_departed_local_endpoint(void) {
+    char *dir = tmpdir();
+    char state[512];
+    char held[512];
+    snprintf(state, sizeof state, "%s/map", dir);
+    snprintf(held, sizeof held, "%s/held", dir);
+    FILE *fp = fopen(state, "w");
+    fprintf(fp, "239.192.14.12 10.42.7.50 0 0\n");
+    fprintf(fp, "239.192.14.12 10.42.7.150 0 0\n");
+    fclose(fp);
+    fp = fopen(held, "w");
+    fprintf(fp, "239.192.14.12 10.42.7.50 0 0\n");
+    fprintf(fp, "239.192.14.12 10.42.7.150 0 0\n");
+    fclose(fp);
+    igmp_runtime *rt = make_rt(dir, "ws-g3-160", "10.42.7.110", 0);
+    attach_file(rt, held, 0);
+    rt->use_kube = 1;
+    rt->mark_from_ledger = 1;
+    snprintf(rt->ledger_path, sizeof rt->ledger_path, "%s/ledger", dir);
+    igmp_runtime_reconcile(rt);
+    expect(!has_op(rt, IGMP_OP_LOCAL_DEL, ip4("10.42.7.50")),
+           "incomplete pod list keeps both local endpoints");
+    free(rt->backend);
+    igmp_runtime_free(rt);
+
+    rt = make_rt(dir, "ws-g3-160", "10.42.7.110", 0);
+    attach_file(rt, state, 0);
+    rt->use_kube = 1;
+    rt->mark_from_ledger = 1;
+    snprintf(rt->ledger_path, sizeof rt->ledger_path, "%s/ledger", dir);
+    igmp_runtime_pods_begin(rt);
+    igmp_runtime_pod_upsert(rt, "app-new", "app", "ws-g3-160", ip4("10.42.7.150"), 0, 0, 1);
+    igmp_runtime_pod_upsert(rt, "elsewhere", "app", "ws-g3-281", ip4("10.42.7.50"), 0, 0, 1);
+    expect(igmp_runtime_pods_end(rt) == 0, "pod list completed");
+    igmp_runtime_reconcile(rt);
+    expect(has_op(rt, IGMP_OP_LOCAL_DEL, ip4("10.42.7.50")), "replaced pod address is removed");
+    expect(!has_op(rt, IGMP_OP_LOCAL_DEL, ip4("10.42.7.150")), "current pod address stays");
+    expect(!has_op(rt, IGMP_OP_GROUP_DEL, 0), "the live local endpoint keeps the group");
+    free(rt->backend);
+    igmp_runtime_free(rt);
+    free(dir);
+}
+
+static void test_list_meta_ignores_pod_version(void) {
+    char rv[64];
+    char cont[64];
+    const char *json =
+        "{\"kind\":\"PodList\",\"metadata\":{\"resourceVersion\":\"100\","
+        "\"continue\":\"abc+def/g==\"},\"items\":[{\"metadata\":{"
+        "\"resourceVersion\":\"1\",\"continue\":\"nope\",\"name\":\"a\",\"uid\":\"u\"}}]}";
+    expect(kube_parse_list_meta(json, rv, sizeof rv, cont, sizeof cont) == 0, "list metadata");
+    expect(strcmp(rv, "100") == 0, "list resourceVersion is not the pod's");
+    expect(strcmp(cont, "abc+def/g==") == 0, "continue token is kept whole");
+    expect(kube_parse_list_meta("{\"metadata\":{\"resourceVersion\":\"9\"},\"items\":[]}", rv,
+                                sizeof rv, cont, sizeof cont) == 0,
+           "last page");
+    expect(strcmp(rv, "9") == 0 && cont[0] == 0, "missing continue is empty");
+}
+
 static void test_unsubscribe_drops_stuck_add(void) {
     char *dir = tmpdir();
     igmp_snap_mem mem;
@@ -1075,6 +1134,8 @@ int main(void) {
     test_cilium_host_annotation();
     test_already_exists_is_success();
     test_orphan_remote_without_ledger();
+    test_departed_local_endpoint();
+    test_list_meta_ignores_pod_version();
     test_unsubscribe_drops_stuck_add();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
