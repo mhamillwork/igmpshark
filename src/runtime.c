@@ -22,6 +22,21 @@ typedef struct igmp_iface {
     char name[32];
 } igmp_iface;
 
+enum { IGMP_HELD_MAX = 8, IGMP_HELD_MS = 30000 };
+
+/* One report per source, kept until that pod IP is learned or it ages out.
+ * A restarted pod sends its join before the watch publishes the new address. */
+typedef struct igmp_held {
+    int used;
+    uint32_t src;
+    int64_t at_ms;
+    uint32_t len;
+    int link;
+    uint32_t ifindex;
+    uint32_t ifgen;
+    uint8_t data[IGMP_FRAME_MAX];
+} igmp_held;
+
 typedef struct igmp_rt_extra {
     igmp_qframe *q;
     int qh;
@@ -38,6 +53,7 @@ typedef struct igmp_rt_extra {
     int nids;
     uint64_t remote_sig;
     igmp_iface ifaces[64];
+    igmp_held held[IGMP_HELD_MAX];
 } igmp_rt_extra;
 
 static igmp_rt_extra *extra(igmp_runtime *rt) {
@@ -164,6 +180,56 @@ static void remember_local(igmp_runtime *rt, uint32_t group, uint32_t sub) {
         igmp_ledger_add(rt->ledger_path, group, sub, 0);
 }
 
+static int pod_on_this_node(const igmp_runtime *rt, const char *node) {
+    if (!rt->node_name[0] || !node || !node[0])
+        return 1;
+    return strcmp(node, rt->node_name) == 0;
+}
+
+static void hold_unbound(igmp_runtime *rt, uint32_t src, const uint8_t *frame, size_t len, int link,
+                         uint32_t ifindex, uint32_t ifgen) {
+    igmp_rt_extra *x = extra(rt);
+    igmp_held *slot = NULL;
+    int fresh = 1;
+    if (src == 0 || !frame || len == 0 || len > IGMP_FRAME_MAX)
+        return;
+    for (int i = 0; i < IGMP_HELD_MAX; i++) {
+        if (x->held[i].used && x->held[i].src == src) {
+            slot = &x->held[i];
+            fresh = 0;
+            break;
+        }
+    }
+    if (!slot) {
+        int oldest = 0;
+        for (int i = 0; i < IGMP_HELD_MAX; i++) {
+            if (!x->held[i].used) {
+                slot = &x->held[i];
+                break;
+            }
+            if (x->held[i].at_ms < x->held[oldest].at_ms)
+                oldest = i;
+        }
+        if (!slot)
+            slot = &x->held[oldest];
+    }
+    slot->used = 1;
+    slot->src = src;
+    slot->at_ms = rt->now_ms;
+    slot->len = (uint32_t)len;
+    slot->link = link;
+    slot->ifindex = ifindex;
+    slot->ifgen = ifgen;
+    memcpy(slot->data, frame, len);
+    if (fresh && rt->log_json) {
+        char ip[32];
+        igmp_ip_fmt(src, ip, sizeof ip);
+        fprintf(stderr,
+                "{\"level\":\"warn\",\"msg\":\"ignored-unbound\",\"src\":\"%s\",\"node\":\"%s\"}\n",
+                ip, rt->node_name);
+    }
+}
+
 int igmp_runtime_on_frame(igmp_runtime *rt, const uint8_t *frame, size_t len, int link,
                           uint32_t ifindex, uint32_t ifgen) {
     igmp_message msg;
@@ -179,6 +245,7 @@ int igmp_runtime_on_frame(igmp_runtime *rt, const uint8_t *frame, size_t len, in
     if (is_report && rt->use_kube && rt->pods.full_list_ok && !pod) {
         rt->ignored_unbound++;
         rt->eng->ignored++;
+        hold_unbound(rt, msg.src, frame, len, link, ifindex, ifgen);
         return -1;
     }
     int before = igmp_engine_joined_count(rt->eng);
@@ -197,6 +264,40 @@ int igmp_runtime_on_frame(igmp_runtime *rt, const uint8_t *frame, size_t len, in
     else if (rc == 0 && msg.kind == IGMP_KIND_V2_LEAVE)
         rt->gen++;
     return rc;
+}
+
+static void replay_held(igmp_runtime *rt, uint32_t ip) {
+    igmp_rt_extra *x = extra(rt);
+    int n = 0;
+    if (!ip || !pod_for_src(rt, ip))
+        return;
+    for (int i = 0; i < IGMP_HELD_MAX; i++) {
+        igmp_held copy;
+        if (!x->held[i].used || x->held[i].src != ip)
+            continue;
+        copy = x->held[i];
+        x->held[i].used = 0;
+        igmp_runtime_on_frame(rt, copy.data, copy.len, copy.link, copy.ifindex, copy.ifgen);
+        n++;
+    }
+    if (n > 0 && rt->log_json) {
+        char ipb[32];
+        igmp_ip_fmt(ip, ipb, sizeof ipb);
+        fprintf(stderr,
+                "{\"level\":\"info\",\"msg\":\"pod-report-replay\",\"ip\":\"%s\",\"count\":%d,"
+                "\"node\":\"%s\"}\n",
+                ipb, n, rt->node_name);
+    }
+}
+
+static void expire_held(igmp_runtime *rt) {
+    igmp_rt_extra *x = extra(rt);
+    for (int i = 0; i < IGMP_HELD_MAX; i++) {
+        if (!x->held[i].used)
+            continue;
+        if (rt->now_ms - x->held[i].at_ms > IGMP_HELD_MS)
+            x->held[i].used = 0;
+    }
 }
 
 int igmp_runtime_enqueue(igmp_runtime *rt, const uint8_t *frame, size_t len, int link,
@@ -248,6 +349,7 @@ static void note_peers(igmp_runtime *rt) {
 }
 
 void igmp_runtime_tick(igmp_runtime *rt) {
+    expire_held(rt);
     note_peers(rt);
     int before = igmp_engine_joined_count(rt->eng);
     igmp_engine_tick(rt->eng, rt->now_ms);
@@ -263,12 +365,24 @@ int igmp_runtime_pod_upsert(igmp_runtime *rt, const char *uid, const char *name,
                             uint32_t ip, int restart_count, int deleting, int from_list) {
     const igmp_pod *prev = igmp_pods_by_uid(&rt->pods, uid);
     int prev_restart = prev ? prev->restart_count : -1;
+    uint32_t old_ip = prev ? prev->ip : 0;
     if (igmp_pods_upsert(&rt->pods, uid, name, node, ip, restart_count, deleting, from_list) != 0)
         return -1;
     if (prev_restart >= 0 && restart_count > prev_restart)
         rt->restarts_ignored++;
     if (ip && !deleting)
         igmp_engine_bind_pod(rt->eng, ip, uid, node);
+    if (ip && !deleting && pod_on_this_node(rt, node)) {
+        if (ip != old_ip && rt->log_json) {
+            char ipb[32];
+            igmp_ip_fmt(ip, ipb, sizeof ipb);
+            fprintf(stderr,
+                    "{\"level\":\"info\",\"msg\":\"pod-ip\",\"ip\":\"%s\",\"pod\":\"%s\","
+                    "\"node\":\"%s\"}\n",
+                    ipb, name ? name : "", rt->node_name);
+        }
+        replay_held(rt, ip);
+    }
     return 0;
 }
 

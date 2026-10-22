@@ -1046,6 +1046,39 @@ static void test_departed_local_endpoint(void) {
     free(dir);
 }
 
+static void test_new_pod_ip_replays_report(void) {
+    char *dir = tmpdir();
+    igmp_runtime *rt = make_rt(dir, "ws-g3-160", "10.42.7.110", 0);
+    uint8_t frame[128];
+    uint32_t g = ip4("239.192.14.12");
+    uint32_t pod = ip4("10.42.7.252");
+    size_t n;
+    rt->use_kube = 1;
+    igmp_runtime_pods_begin(rt);
+    igmp_runtime_pod_upsert(rt, "other", "other", "ws-g3-160", ip4("10.42.7.10"), 0, 0, 1);
+    expect(igmp_runtime_pods_end(rt) == 0, "pod list is complete");
+    n = v2_report(frame, pod, g);
+    rt->now_ms = 1000;
+    expect(igmp_runtime_on_frame(rt, frame, n, IGMP_LINK_ETHERNET, 3, 1) == -1,
+           "report before the new pod ip is ignored");
+    expect(igmp_engine_joined_count(rt->eng) == 0, "membership waits for the pod ip");
+    expect(rt->ignored_unbound == 1, "unbound report counted");
+    igmp_runtime_pod_upsert(rt, "mcast", "mcast", "ws-g3-160", pod, 0, 0, 0);
+    expect(igmp_engine_find(rt->eng, g, pod, 3, NULL) == 1, "held report is applied when the pod ip arrives");
+    expect(igmp_engine_joined_count(rt->eng) == 1, "new pod ip is a membership");
+    rt->now_ms = 1000 + 31000;
+    igmp_runtime_tick(rt);
+    n = v2_report(frame, ip4("10.42.7.253"), g);
+    igmp_runtime_on_frame(rt, frame, n, IGMP_LINK_ETHERNET, 3, 1);
+    rt->now_ms += 31000;
+    igmp_runtime_tick(rt);
+    igmp_runtime_pod_upsert(rt, "late", "late", "ws-g3-160", ip4("10.42.7.253"), 0, 0, 0);
+    expect(igmp_engine_find(rt->eng, g, ip4("10.42.7.253"), 3, NULL) == 0,
+           "a report older than the hold window is not replayed");
+    igmp_runtime_free(rt);
+    free(dir);
+}
+
 static void test_list_meta_ignores_pod_version(void) {
     char rv[64];
     char cont[64];
@@ -1135,6 +1168,7 @@ int main(void) {
     test_already_exists_is_success();
     test_orphan_remote_without_ledger();
     test_departed_local_endpoint();
+    test_new_pod_ip_replays_report();
     test_list_meta_ignores_pod_version();
     test_unsubscribe_drops_stuck_add();
     if (failures) {
