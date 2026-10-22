@@ -55,12 +55,71 @@ static const char *find_key(const char *s, const char *end, const char *key) {
     return NULL;
 }
 
+/* key is the bare name. "podIP" must not match "podIPs". */
+static const char *find_exact_key(const char *s, const char *end, const char *name) {
+    size_t n = strlen(name);
+    if (!s || !name || n == 0)
+        return NULL;
+    for (const char *p = s; p + n + 2 <= end; p++) {
+        if (*p == '"' && memcmp(p + 1, name, n) == 0 && p[1 + n] == '"')
+            return p;
+    }
+    return NULL;
+}
+
+static int string_value(const char *keyat, const char *end, char *out, size_t cap) {
+    const char *p = strchr(keyat, ':');
+    if (!p || p >= end)
+        return -1;
+    p++;
+    return parse_string(&p, end, out, cap);
+}
+
+/* status.podIP when it is IPv4. Otherwise the first IPv4 in status.podIPs.
+ * hostIP is a different key and is never used. */
+static void pod_ipv4(const char *obj, const char *end, uint32_t *ip) {
+    char text[64];
+    const char *podip = find_exact_key(obj, end, "podIP");
+    *ip = 0;
+    if (podip && string_value(podip, end, text, sizeof text) == 0 && igmp_ip_parse(text, ip) == 0 && *ip)
+        return;
+    *ip = 0;
+    const char *podips = find_exact_key(obj, end, "podIPs");
+    if (!podips)
+        return;
+    const char *br = strchr(podips, '[');
+    if (!br || br >= end)
+        return;
+    int depth = 0;
+    const char *limit = end;
+    for (const char *p = br; p < end; p++) {
+        if (*p == '[')
+            depth++;
+        else if (*p == ']') {
+            depth--;
+            if (depth == 0) {
+                limit = p;
+                break;
+            }
+        }
+    }
+    const char *q = br;
+    while (q < limit && (q = find_exact_key(q, limit, "ip")) != NULL) {
+        if (string_value(q, limit, text, sizeof text) == 0 && igmp_ip_parse(text, ip) == 0 && *ip)
+            return;
+        q += 4;
+    }
+    *ip = 0;
+}
+
 /* end is one past the last byte of this object. */
 static int fill_pod(const char *obj, const char *end, kube_event *ev, int watch_deleted) {
     const char *uid = find_key(obj, end, "\"uid\"");
     const char *name = find_key(obj, end, "\"name\"");
     const char *node = find_key(obj, end, "\"nodeName\"");
-    const char *ip = find_key(obj, end, "\"podIP\"");
+    const char *ip = find_exact_key(obj, end, "podIP");
+    if (!ip)
+        ip = find_exact_key(obj, end, "podIPs");
     const char *del = find_key(obj, end, "\"deletionTimestamp\"");
     memset(ev, 0, sizeof *ev);
     if (!uid || !name)
@@ -84,15 +143,7 @@ static int fill_pod(const char *obj, const char *end, kube_event *ev, int watch_
             parse_string(&p, end, ev->node, sizeof ev->node);
         }
     }
-    if (ip) {
-        p = strchr(ip, ':');
-        char text[64];
-        if (p && p + 1 < end) {
-            p = skip_ws(p + 1, end);
-            if (parse_string(&p, end, text, sizeof text) == 0)
-                igmp_ip_parse(text, &ev->ip);
-        }
-    }
+    pod_ipv4(obj, end, &ev->ip);
     int deleting = 0;
     if (del && (ip == NULL || del < ip)) {
         const char *c = strchr(del, ':');

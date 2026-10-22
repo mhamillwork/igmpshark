@@ -1079,6 +1079,30 @@ static void test_new_pod_ip_replays_report(void) {
     free(dir);
 }
 
+static int keep_any(void *user, const kube_event *ev) {
+    *(kube_event *)user = *ev;
+    return 0;
+}
+
+static void test_pod_ipv4_not_host_or_podips_key(void) {
+    const char *json =
+        "{\"kind\":\"PodList\",\"items\":[{\"metadata\":{\"name\":\"mcast\",\"uid\":\"u-mcast\","
+        "\"deletionTimestamp\":null},\"spec\":{\"nodeName\":\"ws-g3-160\"},"
+        "\"status\":{\"hostIP\":\"192.168.106.218\",\"podIPs\":[{\"ip\":\"10.9.9.9\"}],"
+        "\"podIP\":\"10.42.7.155\"}}]}";
+    kube_event ev;
+    memset(&ev, 0, sizeof ev);
+    expect(kube_parse_pod_list(json, keep_any, &ev) == 1, "pod parsed");
+    expect(ev.ip == ip4("10.42.7.155"), "podIP wins over an earlier podIPs entry and hostIP");
+    const char *v6 =
+        "{\"kind\":\"PodList\",\"items\":[{\"metadata\":{\"name\":\"mcast\",\"uid\":\"u-mcast\"},"
+        "\"spec\":{\"nodeName\":\"ws-g3-160\"},\"status\":{\"podIP\":\"fd00::155\","
+        "\"podIPs\":[{\"ip\":\"fd00::155\"},{\"ip\":\"10.42.7.155\"}]}}]}";
+    memset(&ev, 0, sizeof ev);
+    expect(kube_parse_pod_list(v6, keep_any, &ev) == 1, "dual-stack pod parsed");
+    expect(ev.ip == ip4("10.42.7.155"), "IPv4 is taken from podIPs when podIP is IPv6");
+}
+
 static void test_list_meta_ignores_pod_version(void) {
     char rv[64];
     char cont[64];
@@ -1169,6 +1193,7 @@ int main(void) {
     test_orphan_remote_without_ledger();
     test_departed_local_endpoint();
     test_new_pod_ip_replays_report();
+    test_pod_ipv4_not_host_or_podips_key();
     test_list_meta_ignores_pod_version();
     test_unsubscribe_drops_stuck_add();
     if (failures) {

@@ -1,6 +1,7 @@
 #include "runtime.h"
 
 #include "coord.h"
+#include "query.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +55,8 @@ typedef struct igmp_rt_extra {
     uint64_t remote_sig;
     igmp_iface ifaces[64];
     igmp_held held[IGMP_HELD_MAX];
+    uint32_t local_seen[32];
+    int nlocal_seen;
 } igmp_rt_extra;
 
 static igmp_rt_extra *extra(igmp_runtime *rt) {
@@ -243,10 +246,30 @@ int igmp_runtime_on_frame(igmp_runtime *rt, const uint8_t *frame, size_t len, in
     if (is_report)
         pod = pod_for_src(rt, msg.src);
     if (is_report && rt->use_kube && rt->pods.full_list_ok && !pod) {
-        rt->ignored_unbound++;
-        rt->eng->ignored++;
-        hold_unbound(rt, msg.src, frame, len, link, ifindex, ifgen);
-        return -1;
+        char ns[64];
+        /* The watch can miss a restarted pod's address. A fib LOCAL route in
+         * some other network namespace is that pod running on this node. */
+        if (igmp_netns_for_local_ip(msg.src, ns, sizeof ns) == 0) {
+            igmp_rt_extra *x = extra(rt);
+            int seen = 0;
+            for (int i = 0; i < x->nlocal_seen; i++)
+                if (x->local_seen[i] == msg.src)
+                    seen = 1;
+            if (!seen && x->nlocal_seen < 32)
+                x->local_seen[x->nlocal_seen++] = msg.src;
+            if (!seen && rt->log_json) {
+                char ip[32];
+                igmp_ip_fmt(msg.src, ip, sizeof ip);
+                fprintf(stderr,
+                        "{\"level\":\"info\",\"msg\":\"pod-local\",\"ip\":\"%s\",\"node\":\"%s\"}\n",
+                        ip, rt->node_name);
+            }
+        } else {
+            rt->ignored_unbound++;
+            rt->eng->ignored++;
+            hold_unbound(rt, msg.src, frame, len, link, ifindex, ifgen);
+            return -1;
+        }
     }
     int before = igmp_engine_joined_count(rt->eng);
     int rc = igmp_engine_on_message(rt->eng, &msg, ifindex, ifgen, rt->now_ms, frame, len);
