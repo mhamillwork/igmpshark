@@ -21,8 +21,9 @@ int igmp_query_send(const char *ifname, uint32_t src_host, uint32_t group_host, 
  * (MODE_IS_EXCLUDE) is ignored by that datapath. Returns 16 or -1. */
 int igmp_v3_toex_build(uint8_t *out, size_t cap, uint32_t group_host);
 
-/* 1 when text is a fib_trie whose Local section has ip as /32 host LOCAL.
- * A Main-section route (/32 host UNICAST) does not match. */
+/* 1 when text is a fib_trie whose Local section lists ip as its own
+ * /32 host LOCAL leaf. A covering prefix, a neighbor's leaf, and a
+ * Main-section /32 host UNICAST route do not match. */
 int igmp_fib_trie_has_local(const char *text, uint32_t ip);
 
 /* Path of a network namespace whose Local fib trie owns ip, such as

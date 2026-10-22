@@ -46,7 +46,9 @@ typedef struct igmp_remote_sub {
  * while any unmanaged or preserved subscriber remains, because Cilium's
  * group delete wipes the inner map.
  * Local subscriber additions are not emitted: Cilium's datapath inserts
- * those from IGMP, and the CLI insert marks the entry remote. */
+ * those from IGMP, and the CLI insert marks the entry remote.
+ * A plan longer than cap returns the prefix that fits. The caller applies
+ * that and reconciles again; a full buffer is not a failed plan. */
 int igmp_reconcile(const igmp_local_sub *local, int nlocal,
                    const igmp_remote_sub *remote, int nremote,
                    const igmp_actual *actual, int nactual,

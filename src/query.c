@@ -15,6 +15,7 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <sched.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -193,15 +194,29 @@ static int line_has_token(const char *s, size_t len, const char *tok) {
     return 0;
 }
 
+static int line_blank(const char *s, size_t len) {
+    for (size_t i = 0; i < len; i++)
+        if (s[i] != ' ' && s[i] != '\t' && s[i] != '\r')
+            return 0;
+    return 1;
+}
+
+/* The leaf line is `| -- 10.42.5.149` with the flags on the next line.
+ * A prefix such as `+-- 10.42.5.0/24` also contains an address token, and
+ * the next leaf's `/32 host LOCAL` is not that prefix. */
+static int leaf_line(const char *s, size_t len) {
+    return memmem(s, len, "/", 1) == NULL;
+}
+
 int igmp_fib_trie_has_local(const char *text, uint32_t ip) {
     if (!text || ip == 0)
         return 0;
     char want[32];
     igmp_ip_fmt(ip, want, sizeof want);
-    const char *lines[6];
-    size_t lens[6];
-    int nlines = 0;
     int in_local = 0;
+    const char *leaf = NULL;
+    size_t leaf_len = 0;
+    int pending = 0;
     const char *p = text;
     while (*p) {
         const char *eol = strchr(p, '\n');
@@ -209,34 +224,22 @@ int igmp_fib_trie_has_local(const char *text, uint32_t ip) {
         int header = 0;
         if (len >= 5 && strncmp(p, "Local", 5) == 0 && (len == 5 || p[5] == ':')) {
             in_local = 1;
-            nlines = 0;
+            pending = 0;
             header = 1;
         } else if (len >= 4 && strncmp(p, "Main", 4) == 0 && (len == 4 || p[4] == ':')) {
             in_local = 0;
-            nlines = 0;
+            pending = 0;
             header = 1;
         }
-        if (!header && in_local) {
-            if (nlines < 6) {
-                lines[nlines] = p;
-                lens[nlines] = len;
-                nlines++;
-            } else {
-                memmove(lines, lines + 1, 5 * sizeof *lines);
-                memmove(lens, lens + 1, 5 * sizeof *lens);
-                lines[5] = p;
-                lens[5] = len;
-            }
-            for (int i = 0; i < nlines; i++) {
-                if (!line_has_token(lines[i], lens[i], want))
-                    continue;
-                for (int j = i; j < nlines; j++) {
-                    if (memmem(lines[j], lens[j], "/32 host LOCAL", 14))
-                        return 1;
-                    if (j > i && memmem(lines[j], lens[j], "/32 host UNICAST", 16))
-                        break;
-                }
-            }
+        if (!header && in_local && !line_blank(p, len)) {
+            if (line_has_token(p, len, want) && memmem(p, len, "/32 host LOCAL", 14))
+                return 1;
+            if (pending && line_has_token(leaf, leaf_len, want) && leaf_line(leaf, leaf_len) &&
+                memmem(p, len, "/32 host LOCAL", 14))
+                return 1;
+            leaf = p;
+            leaf_len = len;
+            pending = 1;
         }
         if (!eol)
             break;
@@ -280,8 +283,13 @@ int igmp_netns_for_local_ip(uint32_t ip, char *out, size_t cap) {
                 pidbuf[ns - cached] = 0;
                 char trie[96];
                 snprintf(trie, sizeof trie, "%s/net/fib_trie", pidbuf);
-                char body[1 << 16];
-                if (read_trie(trie, body, sizeof body) == 0 && igmp_fib_trie_has_local(body, ip)) {
+                /* A busy node's Local section does not fit in a small stack
+                 * buffer. Truncating it made a neighbor's leaf look local. */
+                char *body = malloc(1 << 20);
+                int hit = body && read_trie(trie, body, 1 << 20) == 0 &&
+                          igmp_fib_trie_has_local(body, ip);
+                free(body);
+                if (hit) {
                     snprintf(out, cap, "%s", cached);
                     return 0;
                 }
@@ -326,10 +334,12 @@ int igmp_netns_for_local_ip(uint32_t ip, char *out, size_t cap) {
             seen[nseen++] = st.st_ino;
         char trie[80];
         snprintf(trie, sizeof trie, "/proc/%s/net/fib_trie", pid);
-        char body[1 << 16];
-        if (read_trie(trie, body, sizeof body) != 0)
+        char *body = malloc(1 << 20);
+        if (!body)
             continue;
-        if (!igmp_fib_trie_has_local(body, ip))
+        int hit = read_trie(trie, body, 1 << 20) == 0 && igmp_fib_trie_has_local(body, ip);
+        free(body);
+        if (!hit)
             continue;
         snprintf(out, cap, "%s", nspath);
         snprintf(cached, sizeof cached, "%s", nspath);

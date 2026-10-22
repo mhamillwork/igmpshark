@@ -45,6 +45,7 @@ typedef struct igmp_rt_extra {
     igmp_op *retry;
     int n_retry;
     int retry_cap;
+    int retry_deletes;
     uint64_t retry_gen;
     int solicit_at;
     int join_at;
@@ -133,7 +134,7 @@ static void log_member(igmp_runtime *rt, const char *msg, const char *reason, ui
 /* Each cilium-dbg call can take the full command timeout. A full pass over
  * every membership blocks the capture loop long enough for kubelet to time
  * out /healthz. Finish the rest on the next reconcile. */
-enum { IGMP_APPLY_PER_PASS = 8 };
+enum { IGMP_APPLY_PER_PASS = 8, IGMP_ACTUAL_CAP = 16384, IGMP_REMOTE_CAP = 4096, IGMP_OP_CAP = 32768 };
 
 static void log_backend(const igmp_runtime *rt, const char *msg) {
     if (!rt->log_json)
@@ -909,10 +910,10 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
         return -1;
     igmp_rt_extra *x = extra(rt);
     x->njoins = 0;
-    igmp_actual *actual = calloc(4096, sizeof *actual);
-    igmp_local_sub *local = calloc(4096, sizeof *local);
-    igmp_remote_sub *remote = calloc(2048, sizeof *remote);
-    igmp_op *ops = calloc(8192, sizeof *ops);
+    igmp_actual *actual = calloc(IGMP_ACTUAL_CAP, sizeof *actual);
+    igmp_local_sub *local = calloc(IGMP_ACTUAL_CAP, sizeof *local);
+    igmp_remote_sub *remote = calloc(IGMP_REMOTE_CAP, sizeof *remote);
+    igmp_op *ops = calloc(IGMP_OP_CAP, sizeof *ops);
     if (!actual || !local || !remote || !ops) {
         free(actual);
         free(local);
@@ -924,7 +925,7 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
     int nactual = 0;
     int loaded = 0;
     if (!continue_plan) {
-        nactual = rt->backend->load(rt->backend, actual, 4096);
+        nactual = rt->backend->load(rt->backend, actual, IGMP_ACTUAL_CAP);
         if (nactual < 0) {
             rt->reconcile_failures++;
             log_backend(rt, "backend-load-failed");
@@ -938,14 +939,14 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
         claim_departed_locals(rt, actual, nactual);
         loaded = 1;
     }
-    int nlocal = fill_local(rt, local, 4096);
+    int nlocal = fill_local(rt, local, IGMP_ACTUAL_CAP);
     int nremote = 0;
     uint32_t stale[128];
     int nstale = 0;
     int allow_remote = 1;
     if (rt->coord_dir[0]) {
         nremote = igmp_coord_load_remote(rt->coord_dir, rt->node_name, igmp_coord_now_ms(),
-                                         rt->snap_max_age_ms, remote, 2048, stale, 128, &nstale,
+                                         rt->snap_max_age_ms, remote, IGMP_REMOTE_CAP, stale, 128, &nstale,
                                          x->ids, x->nids);
         if (nremote < 0) {
             nremote = 0;
@@ -977,7 +978,7 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
     }
     x->remote_sig = remote_sig;
     if (!continue_plan && !loaded) {
-        nactual = rt->backend->load(rt->backend, actual, 4096);
+        nactual = rt->backend->load(rt->backend, actual, IGMP_ACTUAL_CAP);
         if (nactual < 0) {
             rt->reconcile_failures++;
             log_backend(rt, "backend-load-failed");
@@ -993,6 +994,29 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
     int allow_delete = rt->now_ms >= rt->eng->started_ms + rt->eng->cfg.startup_grace_ms;
     if (rt->use_kube && !rt->pods.full_list_ok)
         allow_delete = 0;
+    /* A plan built before the pod list finished contains only adds. Replaying
+     * it after deletes are allowed leaves every old Cilium row in place and
+     * never installs a peer that arrived in a later snapshot. */
+    if (continue_plan && allow_delete && !x->retry_deletes) {
+        continue_plan = 0;
+        x->n_retry = 0;
+        rt->stale_dropped++;
+        if (!loaded) {
+            nactual = rt->backend->load(rt->backend, actual, IGMP_ACTUAL_CAP);
+            if (nactual < 0) {
+                rt->reconcile_failures++;
+                log_backend(rt, "backend-load-failed");
+                free(actual);
+                free(local);
+                free(remote);
+                free(ops);
+                return -1;
+            }
+            apply_ledger_marks(rt, actual, nactual);
+            claim_departed_locals(rt, actual, nactual);
+            loaded = 1;
+        }
+    }
     int nop = 0;
     int from_retry = 0;
     if (continue_plan) {
@@ -1006,7 +1030,7 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
             rt->stale_dropped++;
         }
         nop = igmp_reconcile(local, nlocal, remote, nremote, actual, nactual, rt->node_ip,
-                             allow_delete, allow_delete && allow_remote, stale, nstale, ops, 8192);
+                             allow_delete, allow_delete && allow_remote, stale, nstale, ops, IGMP_OP_CAP);
     }
     if (nop < 0) {
         rt->reconcile_failures++;
@@ -1040,6 +1064,7 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
             memcpy(x->retry, &ops[i], (size_t)left * sizeof(igmp_op));
             x->n_retry = left;
             x->retry_gen = rt->gen;
+            x->retry_deletes = allow_delete;
             deferred = left;
             break;
         }
@@ -1050,6 +1075,7 @@ int igmp_runtime_reconcile(igmp_runtime *rt) {
             memcpy(x->retry, &ops[i], (size_t)left * sizeof(igmp_op));
             x->n_retry = left;
             x->retry_gen = rt->gen;
+            x->retry_deletes = allow_delete;
             failed = 1;
             break;
         }

@@ -1053,21 +1053,35 @@ int main(int argc, char **argv) {
                     snprintf(path, sizeof path, "%s/%s.snap", coord, node);
                     FILE *sf = fopen(path, "r");
                     if (sf) {
-                        char text[1 << 16];
-                        size_t n = fread(text, 1, sizeof text - 1, sf);
-                        text[n] = 0;
+                        char *text = malloc(1 << 20);
+                        size_t n = 0;
+                        if (text)
+                            n = fread(text, 1, (1 << 20) - 1, sf);
+                        int extra = fgetc(sf);
                         fclose(sf);
                         static long publish_status = -1;
-                        int prc = kube_publish_snapshot(node, text);
-                        long st = prc == 0 ? 200 : kube_last_status();
-                        if (st != publish_status) {
-                            publish_status = st;
-                            if (prc != 0)
+                        if (!text || extra != EOF) {
+                            if (publish_status != -2) {
+                                publish_status = -2;
                                 fprintf(stderr,
-                                        "{\"level\":\"warn\",\"msg\":\"snapshot-publish-failed\",\"http\":%ld,"
+                                        "{\"level\":\"warn\",\"msg\":\"snapshot-publish-truncated\","
                                         "\"node\":\"%s\"}\n",
-                                        st, rt->node_name);
+                                        rt->node_name);
+                            }
+                        } else {
+                            text[n] = 0;
+                            int prc = kube_publish_snapshot(node, text);
+                            long st = prc == 0 ? 200 : kube_last_status();
+                            if (st != publish_status) {
+                                publish_status = st;
+                                if (prc != 0)
+                                    fprintf(stderr,
+                                            "{\"level\":\"warn\",\"msg\":\"snapshot-publish-failed\",\"http\":%ld,"
+                                            "\"node\":\"%s\"}\n",
+                                            st, rt->node_name);
+                            }
                         }
+                        free(text);
                     }
                 }
                 igmp_runtime_reconcile(rt);

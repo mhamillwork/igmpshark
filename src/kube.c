@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define KUBE_Q 2048
@@ -542,9 +543,13 @@ int kube_publish_snapshot(const char *node, const char *text) {
     g_http_status = 0;
     if (!k || !node || !text)
         return -1;
-    char b64[1 << 16];
-    if (b64_encode(text, strlen(text), b64, sizeof b64) < 0)
+    size_t text_len = strlen(text);
+    size_t b64cap = (text_len / 3 + 2) * 4 + 8;
+    char *b64 = malloc(b64cap);
+    if (!b64 || b64_encode(text, text_len, b64, b64cap) < 0) {
+        free(b64);
         return -1;
+    }
     char name[160];
     snprintf(name, sizeof name, "igmpshark-%s", node);
     char item[512], coll[512];
@@ -558,6 +563,7 @@ int kube_publish_snapshot(const char *node, const char *text) {
     if (!patch || !create) {
         free(patch);
         free(create);
+        free(b64);
         return -1;
     }
     snprintf(patch, cap,
@@ -570,21 +576,22 @@ int kube_publish_snapshot(const char *node, const char *text) {
              name, b64);
     buf body;
     long code = kube_request(k, item, "PATCH", patch, "Content-Type: application/merge-patch+json",
-                             &body, 3);
+                             &body, 15);
     free(body.data);
     if (code == 404) {
-        code = kube_request(k, coll, "POST", create, "Content-Type: application/json", &body, 3);
+        code = kube_request(k, coll, "POST", create, "Content-Type: application/json", &body, 15);
         free(body.data);
     }
     if (code == 200 || code == 201) {
         free(patch);
         free(create);
+        free(b64);
         return 0;
     }
     /* PUT without resourceVersion is rejected once the ConfigMap exists, and
      * the previous create reused a destroyed curl handle, so peers never saw
      * a snapshot. Read the version and replace the object. */
-    code = kube_request(k, item, "GET", NULL, NULL, &body, 3);
+    code = kube_request(k, item, "GET", NULL, NULL, &body, 15);
     char rv[80] = "";
     if (code == 200 && body.data) {
         const char *p = strstr(body.data, "\"resourceVersion\"");
@@ -600,6 +607,7 @@ int kube_publish_snapshot(const char *node, const char *text) {
     if (!rv[0]) {
         free(patch);
         free(create);
+        free(b64);
         return -1;
     }
     snprintf(create, cap,
@@ -607,10 +615,11 @@ int kube_publish_snapshot(const char *node, const char *text) {
              "\"resourceVersion\":\"%s\",\"labels\":{\"app.kubernetes.io/name\":\"igmpshark\"}},"
              "\"data\":{\"snapshot\":\"%s\"}}",
              name, rv, b64);
-    code = kube_request(k, item, "PUT", create, "Content-Type: application/json", &body, 3);
+    code = kube_request(k, item, "PUT", create, "Content-Type: application/json", &body, 15);
     free(body.data);
     free(patch);
     free(create);
+    free(b64);
     return (code == 200 || code == 201) ? 0 : -1;
 }
 
@@ -621,9 +630,13 @@ struct snap_write {
 
 static int write_one_snapshot(void *user, const char *enc) {
     struct snap_write *w = user;
-    char plain[1 << 16];
-    if (b64_decode(enc, plain, sizeof plain) < 0)
+    char *plain = malloc(1 << 20);
+    if (!plain)
         return 0;
+    if (b64_decode(enc, plain, 1 << 20) < 0) {
+        free(plain);
+        return 0;
+    }
     char node[64] = "peer";
     const char *np = strstr(plain, "NODE ");
     if (np)
@@ -631,12 +644,15 @@ static int write_one_snapshot(void *user, const char *enc) {
     char path[512];
     snprintf(path, sizeof path, "%s/%s.snap", w->dir, node);
     FILE *fp = fopen(path, "w");
-    if (!fp)
+    if (!fp) {
+        free(plain);
         return 0;
+    }
     fputs(plain, fp);
     if (plain[0] && plain[strlen(plain) - 1] != '\n')
         fputc('\n', fp);
     fclose(fp);
+    free(plain);
     w->n++;
     return 0;
 }
@@ -653,7 +669,8 @@ int kube_fetch_snapshots(const char *dir) {
              k->host, k->port, k->ns);
     buf body;
     long code = 0;
-    if (http_get(k, url, &code, &body, 3) != 0 || code != 200) {
+    time_t started = time(NULL);
+    if (http_get(k, url, &code, &body, 15) != 0 || code != 200) {
         g_http_status = code;
         free(body.data);
         return -1;
@@ -665,6 +682,9 @@ int kube_fetch_snapshots(const char *dir) {
         return -1;
     }
     free(body.data);
+    /* Files this fetch did not rewrite are not current peers. Leaving them
+     * would hold their old Remote Node rows after the ConfigMap was gone. */
+    igmp_coord_drop_before(dir, started);
     return w.n;
 }
 

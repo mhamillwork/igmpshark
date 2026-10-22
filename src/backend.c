@@ -688,21 +688,47 @@ int igmp_cilium_result_ok(int op, const char *output, int command_ok) {
     return 0;
 }
 
+/* A node that kept every old subscriber prints far more than 64KiB.
+ * A short buffer used to truncate the list and still return success, and
+ * a short deadline killed `subscriber list all` before it finished. Either
+ * one aborts reconcile, so the engine can report 0 memberships while Cilium
+ * still has the old map. */
+enum { IGMP_LIST_CAP = 4 << 20, IGMP_LIST_TIMEOUT_MS = 30000 };
+
 static int cli_load(igmp_backend *b, igmp_actual *rows, int cap) {
     cli_ctx *ctx = b->user;
-    char buf[1 << 16];
+    char *buf = malloc(IGMP_LIST_CAP);
+    char *gbuf = malloc(1 << 20);
+    if (!buf || !gbuf) {
+        free(buf);
+        free(gbuf);
+        snprintf(b->err, sizeof b->err, "cilium list buffer");
+        return -1;
+    }
     char *list_argv[] = {ctx->bin, "bpf", "multicast", "subscriber", "list", "all", NULL};
-    if (run_argv(list_argv, buf, sizeof buf, ctx->timeout_ms) != 0) {
+    if (run_argv(list_argv, buf, IGMP_LIST_CAP, IGMP_LIST_TIMEOUT_MS) != 0) {
         b->failures++;
         snprintf(b->err, sizeof b->err, "cilium list failed: %.180s", buf);
+        free(buf);
+        free(gbuf);
+        return -1;
+    }
+    if (strlen(buf) + 1 >= IGMP_LIST_CAP) {
+        b->failures++;
+        snprintf(b->err, sizeof b->err, "cilium list truncated");
+        free(buf);
+        free(gbuf);
         return -1;
     }
     int n = igmp_parse_cilium_subscribers(buf, rows, cap);
-    if (n < 0)
+    if (n < 0) {
+        free(buf);
+        free(gbuf);
         return -1;
-    char gbuf[1 << 15];
+    }
     char *group_argv[] = {ctx->bin, "bpf", "multicast", "group", "list", NULL};
-    if (run_argv(group_argv, gbuf, sizeof gbuf, ctx->timeout_ms) == 0 && n < cap) {
+    if (run_argv(group_argv, gbuf, 1 << 20, IGMP_LIST_TIMEOUT_MS) == 0 && n < cap &&
+        strlen(gbuf) + 1 < (1u << 20)) {
         igmp_actual extra[256];
         int ne = igmp_parse_cilium_subscribers(gbuf, extra, 256);
         for (int i = 0; i < ne && n < cap; i++) {
@@ -714,6 +740,8 @@ static int cli_load(igmp_backend *b, igmp_actual *rows, int cap) {
                 rows[n++] = extra[i];
         }
     }
+    free(buf);
+    free(gbuf);
     return n;
 }
 

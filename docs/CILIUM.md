@@ -12,7 +12,7 @@ Cilium documents multicast as beta, VXLAN mode, and kernels at least 5.10 on AMD
 
 `subscriber delete <group> <address>` deletes whatever key is passed. That is the supported way to drop a stale local entry after a pod crashes without a leave: delete the pod source IP. It is also how a remote node IP is removed. Deleting a remote node IP does not remove a local pod entry, and the reverse is also true.
 
-`group delete` removes the inner map, including healthy local subscribers. igmpshark emits it only when the group has no joined local subscribers, no remote subscribers, and no unmanaged rows.
+`group delete` removes the inner map, including healthy local subscribers. igmpshark emits it only when the group has no joined local subscribers, no remote subscribers, and no unmanaged rows. A subscriber list that fills the read buffer is a failed load, not an empty map. The read is 4MiB. A plan larger than one pass is applied from the front and computed again, so an engine with 0 memberships still removes the Local Endpoint and Remote Node rows the list returned, and still adds the peer's current CiliumInternalIP.
 
 ## Commands the CLI backend runs
 

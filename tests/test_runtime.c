@@ -515,9 +515,11 @@ static void test_snap_clock(void) {
     expect(igmp_coord_write(dir, "far", ip4("10.244.1.3"), 0, now + 120000, &mem, 1) == 0,
            "far future snap");
     expect(igmp_coord_write(dir, "old", ip4("10.244.1.4"), 0, now - 600000, &mem, 1) == 0, "old snap");
+    expect(igmp_coord_write(dir, "gap", ip4("10.244.1.5"), 0, now - 15000, &mem, 1) == 0,
+           "recently stale snap");
     igmp_peer peers[8];
     int n = igmp_coord_peers(dir, "self", now, 4200, peers, 8);
-    expect(n == 3, "three peers");
+    expect(n == 4, "four peers");
     int near = 0, far = 0, old = 0;
     for (int i = 0; i < n; i++) {
         if (strcmp(peers[i].name, "near") == 0)
@@ -530,6 +532,23 @@ static void test_snap_clock(void) {
     expect(near == 1, "20s future skew stays fresh");
     expect(far == 0, "2min future skew is stale");
     expect(old == 0, "old snap is stale");
+    uint32_t held[4];
+    int nstale = 0;
+    igmp_remote_sub remote[4];
+    int nr = igmp_coord_load_remote(dir, "self", now, 10000, remote, 4, held, 4, &nstale, NULL, 0);
+    expect(nr == 1 && remote[0].node_ip == ip4("10.244.1.2"), "20s future peer is installed");
+    int saw_gap = 0, saw_far = 0, saw_old = 0;
+    for (int i = 0; i < nstale; i++) {
+        if (held[i] == ip4("10.244.1.5"))
+            saw_gap = 1;
+        if (held[i] == ip4("10.244.1.3"))
+            saw_far = 1;
+        if (held[i] == ip4("10.244.1.4"))
+            saw_old = 1;
+    }
+    expect(saw_gap == 1, "a short publish gap is held");
+    expect(saw_far == 0, "a far-future snapshot does not pin remote rows");
+    expect(saw_old == 0, "a long-dead snapshot does not pin remote rows");
     free(dir);
 }
 
@@ -832,6 +851,20 @@ static void test_toex_and_trie(void) {
     expect(igmp_fib_trie_has_local(host, ip4("10.42.7.50")) == 0,
            "host route is not a local address");
     expect(igmp_fib_trie_has_local(host, ip4("10.42.7.178")) == 1, "host's own local address matches");
+    const char *neighbor =
+        "Local:\n"
+        "  +-- 10.42.5.0/24 2 0 3\n"
+        "     |-- 10.42.5.0\n"
+        "        /32 link BROADCAST\n"
+        "     |-- 10.42.5.149\n"
+        "        /32 host LOCAL\n"
+        "     |-- 10.42.5.50\n"
+        "        /32 host UNICAST\n";
+    expect(igmp_fib_trie_has_local(neighbor, ip4("10.42.5.149")) == 1, "leaf local address matches");
+    expect(igmp_fib_trie_has_local(neighbor, ip4("10.42.5.0")) == 0,
+           "pod CIDR prefix is not a local pod");
+    expect(igmp_fib_trie_has_local(neighbor, ip4("10.42.5.50")) == 0,
+           "neighbor LOCAL does not keep a departed pod");
 }
 
 static void test_pod_list_without_kind(void) {
@@ -1235,6 +1268,102 @@ static void test_unsubscribe_drops_stuck_add(void) {
     free(dir);
 }
 
+static int no_pod_live(uint32_t ip) {
+    (void)ip;
+    return 0;
+}
+
+/* Engine memberships are 0. Cilium still has a departed local endpoint and
+ * an old remote node. A fresh snapshot from 160 has to become that node's
+ * CiliumInternalIP, and the old rows have to be deleted. */
+static void test_empty_engine_replaces_stale_cilium(void) {
+    char *dir = tmpdir();
+    char state[512];
+    snprintf(state, sizeof state, "%s/map", dir);
+    FILE *fp = fopen(state, "w");
+    fputs("239.192.14.12 10.42.5.40 0 0\n", fp);
+    fputs("239.192.14.12 10.42.9.9 1 1\n", fp);
+    fputs("239.1.1.1 10.42.7.110 1 1\n", fp);
+    fclose(fp);
+    igmp_snap_mem mem;
+    memset(&mem, 0, sizeof mem);
+    mem.group = ip4("239.192.14.12");
+    mem.subscriber = ip4("10.42.7.155");
+    mem.joined = 1;
+    expect(igmp_coord_write(dir, "ws-g3-160", ip4("10.42.7.110"), 0, igmp_coord_now_ms(), &mem,
+                            1) == 0,
+           "160 publishes its current group");
+    igmp_runtime *rt = make_rt(dir, "ws-g3-281", "10.42.5.149", 0);
+    attach_file(rt, state, 0);
+    rt->use_kube = 1;
+    rt->mark_from_ledger = 1;
+    snprintf(rt->ledger_path, sizeof rt->ledger_path, "%s/ledger", dir);
+    igmp_runtime_set_pod_local_fn(no_pod_live);
+    igmp_runtime_pods_begin(rt);
+    igmp_runtime_pod_upsert(rt, "other", "other", "ws-g3-281", ip4("10.42.5.9"), 0, 0, 1);
+    expect(igmp_runtime_pods_end(rt) == 0, "281 pod list completed without the old ip");
+    igmp_ip_rewrite rw;
+    memset(&rw, 0, sizeof rw);
+    snprintf(rw.name, sizeof rw.name, "%s", "ws-g3-160");
+    rw.ip = ip4("10.42.7.110");
+    igmp_runtime_set_identities(rt, &rw, 1);
+    expect(igmp_engine_joined_count(rt->eng) == 0, "metrics memberships stay 0");
+    igmp_runtime_reconcile(rt);
+    expect(has_op(rt, IGMP_OP_LOCAL_DEL, ip4("10.42.5.40")), "departed local endpoint is deleted");
+    expect(has_op(rt, IGMP_OP_REMOTE_DEL, ip4("10.42.9.9")), "old remote node is deleted");
+    expect(has_op(rt, IGMP_OP_REMOTE_ADD, ip4("10.42.7.110")),
+           "160 is installed as its CiliumInternalIP");
+    expect(has_op(rt, IGMP_OP_REMOTE_DEL, ip4("10.42.7.110")),
+           "160 is removed from a group it no longer publishes");
+    expect(igmp_engine_joined_count(rt->eng) == 0, "cleanup does not invent a membership");
+    igmp_runtime_set_pod_local_fn(NULL);
+    free(rt->backend);
+    igmp_runtime_free(rt);
+    free(dir);
+}
+
+/* The first reconcile runs before the pod list finishes, so its plan is
+ * adds only and does not fit in one pass. After the list completes, that
+ * plan must not keep replaying or the old Cilium rows never leave. */
+static void test_startup_plan_does_not_block_deletes(void) {
+    char *dir = tmpdir();
+    char state[512];
+    snprintf(state, sizeof state, "%s/map", dir);
+    FILE *fp = fopen(state, "w");
+    fputs("239.8.0.1 10.42.5.40 0 0\n", fp);
+    fclose(fp);
+    igmp_runtime *rt = make_rt(dir, "ws-g3-281", "10.42.5.149", 0);
+    attach_file(rt, state, 0);
+    rt->use_kube = 1;
+    rt->mark_from_ledger = 1;
+    snprintf(rt->ledger_path, sizeof rt->ledger_path, "%s/ledger", dir);
+    igmp_runtime_set_pod_local_fn(no_pod_live);
+    igmp_runtime_pods_begin(rt);
+    igmp_runtime_pod_upsert(rt, "app", "mcast", "ws-g3-281", ip4("10.8.0.1"), 0, 0, 1);
+    uint8_t frame[128];
+    for (int i = 1; i <= 12; i++) {
+        char gbuf[32];
+        snprintf(gbuf, sizeof gbuf, "239.8.0.%d", i);
+        rt->now_ms = (int64_t)i * 1000;
+        size_t n = v2_report(frame, ip4("10.8.0.1"), ip4(gbuf));
+        igmp_runtime_on_frame(rt, frame, n, IGMP_LINK_ETHERNET, 1, 1);
+    }
+    expect(igmp_engine_joined_count(rt->eng) == 12, "joins recorded before the list ends");
+    int first = igmp_runtime_reconcile(rt);
+    expect(first == 8, "startup plan is adds and stops at the budget");
+    expect(!has_op(rt, IGMP_OP_LOCAL_DEL, ip4("10.42.5.40")),
+           "deletes wait until the pod list finishes");
+    expect(igmp_runtime_pods_end(rt) == 0, "list keeps the joined pod");
+    expect(igmp_engine_joined_count(rt->eng) == 12, "listed pod is not swept");
+    igmp_runtime_reconcile(rt);
+    expect(has_op(rt, IGMP_OP_LOCAL_DEL, ip4("10.42.5.40")),
+           "finished list deletes the departed local endpoint");
+    igmp_runtime_set_pod_local_fn(NULL);
+    free(rt->backend);
+    igmp_runtime_free(rt);
+    free(dir);
+}
+
 int main(void) {
     test_dry_and_idempotent();
     test_pod_lifecycle();
@@ -1264,6 +1393,8 @@ int main(void) {
     test_list_meta_ignores_pod_version();
     test_restart_ip_survives_cleanup();
     test_unsubscribe_drops_stuck_add();
+    test_empty_engine_replaces_stale_cilium();
+    test_startup_plan_does_not_block_deletes();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

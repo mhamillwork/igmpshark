@@ -307,7 +307,7 @@ int kube_each_snapshot(const char *json, int (*cb)(void *user, const char *b64),
         return -1;
     const char *end = json + strlen(json);
     const char *p = json;
-    char *enc = malloc(1 << 16);
+    char *enc = malloc(1 << 20);
     if (!enc)
         return -1;
     int n = 0;
@@ -318,7 +318,7 @@ int kube_each_snapshot(const char *json, int (*cb)(void *user, const char *b64),
             continue;
         }
         s++;
-        if (parse_string(&s, end, enc, 1 << 16) != 0) {
+        if (parse_string(&s, end, enc, 1 << 20) != 0) {
             p += 10;
             continue;
         }

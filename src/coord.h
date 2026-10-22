@@ -4,6 +4,8 @@
 #include "igmp_types.h"
 #include "reconcile.h"
 
+#include <time.h>
+
 typedef struct igmp_snap_mem {
     uint32_t group;
     uint32_t subscriber;
@@ -36,6 +38,10 @@ int64_t igmp_coord_now_ms(void);
  * subdirectory is not created by the mount. */
 int igmp_coord_ensure(const char *dir);
 
+/* Remove snapshots last written before oldest_keep. A fetch that did not
+ * refresh a peer must not leave that file to pin the old remote rows. */
+int igmp_coord_drop_before(const char *dir, time_t oldest_keep);
+
 /* Atomic snapshot. members may be NULL when nmem is 0. */
 int igmp_coord_write(const char *dir, const char *node, uint32_t node_ip, int active,
                      int64_t now_ms, const igmp_snap_mem *members, int nmem);
@@ -45,7 +51,10 @@ int igmp_coord_peers(const char *dir, const char *self_node, int64_t now_ms,
 
 /* rewrite replaces a peer's published address by node name. When nrewrite is
  * greater than zero, a peer that is not in the table is skipped: the address
- * in its snapshot is not installed. nrewrite zero keeps the snapshot address. */
+ * in its snapshot is not installed. nrewrite zero keeps the snapshot address.
+ * A snapshot past max_age is not installed. Its remote rows are held for one
+ * further max_age, then released. A file older than that does not pin the
+ * previous Remote Node entries. */
 int igmp_coord_load_remote(const char *dir, const char *self_node, int64_t now_ms,
                            int64_t max_age_ms, igmp_remote_sub *out, int cap,
                            uint32_t *stale_ips, int stale_cap, int *nstale,

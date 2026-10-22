@@ -469,6 +469,10 @@ static void test_reconcile(void) {
     n = igmp_reconcile(local, 2, remote, 1, actual, 4, self, 1, 0, NULL, 0, ops, 16);
     expect(count_op(ops, n, IGMP_OP_REMOTE_DEL) == 0, "coord outage skips remote delete");
     expect(count_op(ops, n, IGMP_OP_LOCAL_DEL) >= 1, "local delete still planned");
+    local[0].joined = 1;
+    remote[0].joined_count = 1;
+    n = igmp_reconcile(local, 2, remote, 1, actual, 0, self, 1, 1, NULL, 0, ops, 1);
+    expect(n == 1 && ops[0].op == IGMP_OP_GROUP_ADD, "a full op buffer keeps the first add");
 }
 
 static void test_lmq_response_and_churn(void) {

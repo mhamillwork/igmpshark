@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 /* A peer clock a little ahead of ours is still a live snapshot. */
 enum { IGMP_SNAP_FUTURE_SKEW_MS = 30000 };
@@ -16,6 +17,27 @@ int64_t igmp_coord_now_ms(void) {
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
         return 0;
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+int igmp_coord_drop_before(const char *dir, time_t oldest_keep) {
+    DIR *d = opendir(dir ? dir : "");
+    if (!d)
+        return -1;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        size_t len = strlen(de->d_name);
+        if (len < 6 || strcmp(de->d_name + len - 5, ".snap") != 0)
+            continue;
+        char path[768];
+        snprintf(path, sizeof path, "%s/%s", dir, de->d_name);
+        struct stat st;
+        if (stat(path, &st) != 0)
+            continue;
+        if (st.st_mtime < oldest_keep)
+            unlink(path);
+    }
+    closedir(d);
+    return 0;
 }
 
 int igmp_coord_ensure(const char *dir) {
@@ -203,6 +225,13 @@ int igmp_coord_load_remote(const char *dir, const char *self_node, int64_t now_m
     int ns = 0;
     for (int i = 0; i < np; i++) {
         if (!peers[i].fresh) {
+            /* The fresh window is max_age. Hold one extra window so a short
+             * publish gap does not remove the peer. A file older than that,
+             * or dated that far in the future, is not a live node: holding
+             * it keeps every old Remote Node row and hides the current one. */
+            int64_t age = now_ms - peers[i].ts_ms;
+            if (max_age_ms > 0 && (age > max_age_ms * 2 || age < -max_age_ms))
+                continue;
             uint32_t held = peers[i].ip;
             if (nrewrite > 0) {
                 uint32_t mapped = rewritten_ip(rewrite, nrewrite, peers[i].name);

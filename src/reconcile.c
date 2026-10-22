@@ -83,7 +83,7 @@ int igmp_reconcile(const igmp_local_sub *local, int nlocal,
                 if (out[k].op == IGMP_OP_GROUP_ADD && out[k].group == local[i].group)
                     already = 1;
             if (!already && emit(out, &n, cap, IGMP_OP_GROUP_ADD, local[i].group, 0) != 0)
-                return -1;
+                return n > 0 ? n : -1;
         }
     }
     for (int i = 0; i < nremote; i++) {
@@ -97,11 +97,11 @@ int igmp_reconcile(const igmp_local_sub *local, int nlocal,
                 if (out[k].op == IGMP_OP_GROUP_ADD && out[k].group == remote[i].group)
                     already = 1;
             if (!already && emit(out, &n, cap, IGMP_OP_GROUP_ADD, remote[i].group, 0) != 0)
-                return -1;
+                return n > 0 ? n : -1;
         }
         if (!actual_has(actual, nactual, remote[i].group, remote[i].node_ip, 1)) {
             if (emit(out, &n, cap, IGMP_OP_REMOTE_ADD, remote[i].group, remote[i].node_ip) != 0)
-                return -1;
+                return n > 0 ? n : -1;
         }
     }
     if (!allow_delete)
@@ -121,10 +121,10 @@ int igmp_reconcile(const igmp_local_sub *local, int nlocal,
                     keep = 1;
             }
             if (!keep && emit(out, &n, cap, IGMP_OP_REMOTE_DEL, actual[i].group, actual[i].addr) != 0)
-                return -1;
+                return n > 0 ? n : -1;
         } else if (!local_joined(local, nlocal, actual[i].group, actual[i].addr)) {
             if (emit(out, &n, cap, IGMP_OP_LOCAL_DEL, actual[i].group, actual[i].addr) != 0)
-                return -1;
+                return n > 0 ? n : -1;
         }
     }
     for (int i = 0; i < nactual; i++) {
@@ -139,7 +139,7 @@ int igmp_reconcile(const igmp_local_sub *local, int nlocal,
             if (out[k].op == IGMP_OP_GROUP_DEL && out[k].group == actual[i].group)
                 already = 1;
         if (!already && emit(out, &n, cap, IGMP_OP_GROUP_DEL, actual[i].group, 0) != 0)
-            return -1;
+            return n > 0 ? n : -1;
     }
     return n;
 }
