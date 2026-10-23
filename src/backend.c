@@ -232,14 +232,35 @@ typedef struct cli_ctx {
     int timeout_ms;
 } cli_ctx;
 
-/* Cilium 1.19 prints the remote type as "Remote Node". The first token is
- * enough: anything starting with "R" is a CiliumNode address, not a pod. */
+/* Cilium 1.19 prints the remote type as "Remote Node" and a pod as
+ * "Local Endpoint". The first letter is enough. A group with several
+ * subscribers prints the group address only on the first line; the rest
+ * leave that column blank and still belong to the group above. Dropping
+ * those lines left the second Local Endpoint in the map. */
+static int push_row(igmp_actual *rows, int *n, int cap, uint32_t group, uint32_t addr, int remote) {
+    if (*n >= cap)
+        return -1;
+    rows[*n].group = group;
+    rows[*n].addr = addr;
+    rows[*n].remote = remote;
+    rows[*n].managed = 0;
+    (*n)++;
+    return 0;
+}
+
+static int type_remote(const char *tok, int have_type) {
+    if (!have_type)
+        return 1;
+    return tok[0] == 'R' || tok[0] == 'r';
+}
+
 int igmp_parse_cilium_subscribers(const char *text, igmp_actual *rows, int cap) {
     if (!text || !rows || cap < 1)
         return -1;
     int n = 0;
+    uint32_t current = 0;
     const char *p = text;
-    while (*p && n < cap) {
+    while (*p) {
         const char *eol = strchr(p, '\n');
         size_t len = eol ? (size_t)(eol - p) : strlen(p);
         char line[256];
@@ -251,21 +272,17 @@ int igmp_parse_cilium_subscribers(const char *text, igmp_actual *rows, int cap) 
         int nf = sscanf(line, "%63s %63s %63s", a, b, c);
         uint32_t g = 0, addr = 0;
         if (nf >= 1 && igmp_ip_parse(a, &g) == 0 && igmp_group_routable(g)) {
+            current = g;
             if (nf >= 2 && igmp_ip_parse(b, &addr) == 0) {
-                rows[n].group = g;
-                rows[n].addr = addr;
-                rows[n].remote = (c[0] == 'R' || c[0] == 'r') ? 1 : 0;
-                if (nf < 3)
-                    rows[n].remote = 1;
-                rows[n].managed = 0;
-                n++;
+                if (push_row(rows, &n, cap, g, addr, type_remote(c, nf >= 3)) != 0)
+                    return -1;
             } else if (nf == 1) {
-                rows[n].group = g;
-                rows[n].addr = 0;
-                rows[n].remote = 1;
-                rows[n].managed = 0;
-                n++;
+                if (push_row(rows, &n, cap, g, 0, 1) != 0)
+                    return -1;
             }
+        } else if (current && nf >= 1 && igmp_ip_parse(a, &addr) == 0 && addr != 0) {
+            if (push_row(rows, &n, cap, current, addr, type_remote(b, nf >= 2)) != 0)
+                return -1;
         }
         if (!eol)
             break;
@@ -722,6 +739,8 @@ static int cli_load(igmp_backend *b, igmp_actual *rows, int cap) {
     }
     int n = igmp_parse_cilium_subscribers(buf, rows, cap);
     if (n < 0) {
+        b->failures++;
+        snprintf(b->err, sizeof b->err, "cilium list truncated");
         free(buf);
         free(gbuf);
         return -1;

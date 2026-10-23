@@ -498,6 +498,28 @@ static void test_quiet_subscriber_and_queue(void) {
     nr = igmp_parse_cilium_subscribers(v119, rows, 8);
     expect(nr == 2 && rows[0].remote == 0 && rows[1].remote == 1 && rows[1].addr == ip4("10.244.1.86"),
            "cilium 1.19 Remote Node type");
+    /* Cilium 1.19.3 prints the group only on the first subscriber. Later
+     * lines of that group leave the group column blank. */
+    const char *folded = "Group           Subscriber      Type\n"
+                         "239.192.14.12   10.42.5.33      Local Endpoint\n"
+                         "                10.42.5.149     Local Endpoint\n"
+                         "                10.42.7.110     Remote Node\n"
+                         "239.1.1.1\n";
+    nr = igmp_parse_cilium_subscribers(folded, rows, 8);
+    expect(nr == 4, "blank group column stays with the group above");
+    expect(rows[0].group == ip4("239.192.14.12") && rows[0].addr == ip4("10.42.5.33") &&
+               rows[0].remote == 0,
+           "first local endpoint");
+    expect(rows[1].group == ip4("239.192.14.12") && rows[1].addr == ip4("10.42.5.149") &&
+               rows[1].remote == 0,
+           "second local endpoint is kept");
+    expect(rows[2].group == ip4("239.192.14.12") && rows[2].addr == ip4("10.42.7.110") &&
+               rows[2].remote == 1,
+           "remote node on a blank group column");
+    expect(rows[3].group == ip4("239.1.1.1") && rows[3].addr == 0, "group with no subscribers");
+    igmp_actual one[1];
+    expect(igmp_parse_cilium_subscribers(folded, one, 1) < 0,
+           "a subscriber list that does not fit is an error");
     igmp_runtime_free(rt);
     free(dir);
 }
