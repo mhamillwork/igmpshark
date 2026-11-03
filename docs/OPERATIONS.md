@@ -51,6 +51,8 @@ Metrics to look at: `igmpshark_memberships`, `igmpshark_joins_total`, `igmpshark
 
 Logs are single-line JSON on stderr.
 
+The membership table, pod table, and reconcile buffers are fixed sizes. About 130 groups and two subscribers do not accumulate. Process memory used to climb for as long as the pod stayed up because every pod list, pod watch, and snapshot fetch copied the service-account token into a curl header and never freed it. Those headers are freed with the request. A pod that already grew has to be restarted onto a build that contains that free; the copies already made are not released by the running process.
+
 ## Missing IGMP
 
 `hostNetwork` does not mean the pod's reports are visible. Capture the interface you configured (`any` is cooked capture) and confirm proto 2:

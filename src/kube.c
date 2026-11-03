@@ -74,6 +74,9 @@ static int read_file(const char *path, char *out, size_t cap) {
     return 0;
 }
 
+/* curl_easy_cleanup does not free CURLOPT_HTTPHEADER. Each call copies the
+ * bearer token. PRIVATE holds that list so the matching cleanup frees it.
+ * Do not store anything else in PRIVATE on this handle. */
 static int kube_setup_easy(kube_client *k, CURL *c, const char *url, buf *body, long timeout_s) {
     curl_easy_setopt(c, CURLOPT_URL, url);
     curl_easy_setopt(c, CURLOPT_CAINFO, k->ca);
@@ -87,7 +90,17 @@ static int kube_setup_easy(kube_client *k, CURL *c, const char *url, buf *body, 
     hdr = curl_slist_append(hdr, auth);
     hdr = curl_slist_append(hdr, "Accept: application/json");
     curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdr);
+    curl_easy_setopt(c, CURLOPT_PRIVATE, hdr);
     return 0;
+}
+
+static void kube_easy_cleanup(CURL *c) {
+    struct curl_slist *hdr = NULL;
+    if (!c)
+        return;
+    curl_easy_getinfo(c, CURLINFO_PRIVATE, &hdr);
+    curl_easy_cleanup(c);
+    curl_slist_free_all(hdr);
 }
 
 /* Wait for a slot. Dropping a list event and then treating the page as
@@ -311,9 +324,7 @@ static int http_get(kube_client *k, const char *url, long *code, buf *body, long
     CURLcode rc = curl_easy_perform(c);
     if (rc == CURLE_OK)
         curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, code);
-    struct curl_slist *hdr = NULL;
-    curl_easy_getinfo(c, CURLINFO_PRIVATE, &hdr);
-    curl_easy_cleanup(c);
+    kube_easy_cleanup(c);
     if (rc != CURLE_OK) {
         free(body->data);
         body->data = NULL;
@@ -400,7 +411,7 @@ static void *kube_thread(void *arg) {
         kube_setup_easy(k, c, url, &watch, 40);
         curl_easy_perform(c);
         curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &wcode);
-        curl_easy_cleanup(c);
+        kube_easy_cleanup(c);
         if (wcode == 410) {
             snprintf(rv, sizeof rv, "0");
             free(watch.data);
